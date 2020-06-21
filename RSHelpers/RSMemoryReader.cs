@@ -72,7 +72,7 @@ namespace RockSnifferLib.RSHelpers
             //
             // This is set to the arrangement persistent id while playing a song
             string arrangement_hash = MemoryHelper.ReadStringFromMemory(rsProcessHandle, FollowPointers(0x00F5C5AC, new int[] { 0x18, 0x18, 0xC, 0x1C0, 0x0 }));
-            if (arrangement_hash != null & arrangement_hash.length == 32)
+            if (arrangement_hash != null && arrangement_hash.length == 32)
             {
                 readout.arrangementID = arrangement_hash;
             }
