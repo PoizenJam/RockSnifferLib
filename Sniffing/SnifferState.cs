@@ -31,6 +31,11 @@
         SONG_PLAYING,
 
         /// <summary>
+        /// Song is playing
+        /// </summary>
+        SONG_PAUSED,
+
+        /// <summary>
         /// Song is about to end
         /// </summary>
         SONG_ENDING

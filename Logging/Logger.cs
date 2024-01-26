@@ -51,7 +51,7 @@ namespace RockSnifferLib.Logging
         /// <param name="p"></param>
         public static void LogError(string pattern, params object[] p)
         {
-            pattern = "[" + DateTime.Now + "] " + pattern;
+            pattern = "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " + pattern;
 
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine(pattern, p);
@@ -81,7 +81,7 @@ namespace RockSnifferLib.Logging
         /// <param name="p"></param>
         public static void Log(string pattern, params object[] p)
         {
-            pattern = "[" + DateTime.Now + "] " + pattern;
+            pattern = "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " + pattern;
 
             Console.WriteLine(pattern, p);
 
