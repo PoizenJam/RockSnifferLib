@@ -216,7 +216,7 @@ namespace RockSnifferLib.Sniffing
                         lastTime = float.MinValue;
                         maxTime = float.MinValue;
                         paused = false;
-                        Logger.Log("New Song!");
+                        //Logger.Log("New Song!");
                         currentCDLCDetails = _cache.Get(newReadout.songID);
                         OnSongChanged?.Invoke(this, new OnSongChangedArgs { songDetails = currentCDLCDetails });
                         currentCDLCDetails.Print();

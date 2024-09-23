@@ -210,7 +210,7 @@ namespace RockSnifferLib.RSHelpers
                             arrangementDetails.type = "Bass";
                         }
 
-                        arrangementDetails.tuning = new ArrangementTuning(arrangement.Tuning, (int)arrangement.CentOffset, (int)arrangement.CapoFret);
+                        arrangementDetails.tuning = new ArrangementTuning(arrangement.ArrangementProperties.PathBass == 1, arrangement.Tuning, (int)arrangement.CentOffset, (int)arrangement.CapoFret);
 
 
                         //file hash
