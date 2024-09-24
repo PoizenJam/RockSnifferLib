@@ -552,7 +552,7 @@ namespace RockSnifferLib.Sniffing
                             "length=" + currentCDLCDetails.songLength + ";" +
                             "path=" + path + ";" +
                             "tuning=" + tuning + ";" +
-                            "author=" + currentCDLCDetails.toolkit.author + ";"
+                            "author=" + currentCDLCDetails.toolkit.author.Trim() + ";"
                             );
                     }
                     break;
