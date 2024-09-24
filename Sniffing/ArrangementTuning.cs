@@ -227,8 +227,9 @@ namespace RockSnifferLib.Sniffing
                 }
 
                 //Calculate estimated hz offset from cents offset, if nonzero
-                if (CentsOffset != 0)
+                if ((CentsOffset != 0) && (CentsOffset != -1200))
                 {
+                    if (CentsOffset < -600) { CentsOffset = CentsOffset + 1200; };
                     name = $"{name}: A{Math.Floor(440d * Math.Pow(2d, CentsOffset / 1200d))}";
                 }
                 
