@@ -705,7 +705,10 @@ namespace RockSnifferLib.Sniffing
             }
 
             // Force state to IN_MENUS if the current song details are not valid
-            if (!currentCDLCDetails.IsValid())
+            if (!currentCDLCDetails.IsValid() &&
+                currentState != SnifferState.IN_MENUS &&
+                currentState != SnifferState.SONG_ENDING &&
+                currentState != SnifferState.SONG_PAUSED)
             {
                 currentState = SnifferState.IN_MENUS;
             }
