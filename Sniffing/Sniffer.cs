@@ -623,7 +623,6 @@ namespace RockSnifferLib.Sniffing
                 case SnifferState.SONG_PLAYING:
                     // Allow small margin at end of song
                     if (currentCDLCDetails != null &&
-                        currentCDLCDetails.IsValid() &&
                         currentMemoryReadout.songTimer >= currentCDLCDetails.songLength - 0.25f)
                     {
                         currentState = SnifferState.SONG_ENDING;
