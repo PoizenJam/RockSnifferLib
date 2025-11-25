@@ -3,9 +3,10 @@ using System;
 
 namespace RockSnifferLib.Events
 {
-    public class OnSongEndedArgs : EventArgs
+    public class OnActualSongEndArgs : EventArgs
     {
         public SongDetails song;
+        public DateTime timestamp;
         public bool completed;
         public bool paused;
     }

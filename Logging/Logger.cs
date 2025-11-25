@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Text;
 
@@ -9,6 +9,12 @@ namespace RockSnifferLib.Logging
     /// </summary>
     public static class Logger
     {
+        // Event fired when EVENT=START is logged, with timestamp and message
+        public static event EventHandler<EventLoggedArgs> OnEventStartLogged;
+        
+        // Event fired when EVENT=END is logged, with timestamp and message
+        public static event EventHandler<EventLoggedArgs> OnEventEndLogged;
+
         /// <summary>
         /// Log cache related information
         /// </summary>
@@ -51,8 +57,7 @@ namespace RockSnifferLib.Logging
         /// <param name="p"></param>
         public static void LogError(string pattern, params object[] p)
         {
-            pattern = "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " + pattern;
-
+            pattern = "[" + DateTime.Now + "] " + pattern;
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine(pattern, p);
             Console.ResetColor();
@@ -81,11 +86,34 @@ namespace RockSnifferLib.Logging
         /// <param name="p"></param>
         public static void Log(string pattern, params object[] p)
         {
-            pattern = "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " + pattern;
+            DateTime timestamp = DateTime.Now;
+            string message = string.Format(pattern, p);
 
-            Console.WriteLine(pattern, p);
+            // Fire events for EVENT=START and EVENT=END with timestamp and message
+            // These fire BEFORE any output, ensuring timestamp accuracy
+            if (message.StartsWith("EVENT=START"))
+            {
+                OnEventStartLogged?.Invoke(null, new EventLoggedArgs { 
+                    Timestamp = timestamp, 
+                    Message = message 
+                });
+                // Suppress output - EventLogger will handle it based on config
+                return;
+            }
+            else if (message.StartsWith("EVENT=END"))
+            {
+                OnEventEndLogged?.Invoke(null, new EventLoggedArgs { 
+                    Timestamp = timestamp, 
+                    Message = message 
+                });
+                // Suppress output - EventLogger will handle it based on config
+                return;
+            }
 
-            WriteToFile("sniffer.log", string.Format(pattern, p) + "\r\n");
+            // For all other logs, output normally
+            string formattedPattern = "[" + timestamp + "] " + pattern;
+            Console.WriteLine(formattedPattern, p);
+            WriteToFile("sniffer.log", string.Format(formattedPattern, p) + "\r\n");
         }
 
         private static void WriteToFile(string path, string text)

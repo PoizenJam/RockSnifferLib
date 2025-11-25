@@ -1,4 +1,4 @@
-﻿using RockSnifferLib.Cache;
+using RockSnifferLib.Cache;
 using RockSnifferLib.Configuration;
 using RockSnifferLib.Events;
 using RockSnifferLib.Logging;
@@ -28,6 +28,8 @@ namespace RockSnifferLib.Sniffing
         /// <summary>
         /// Fired after each successful memory readout
         /// </summary>
+        public event EventHandler<OnActualSongStartArgs> OnActualSongStart;
+        public event EventHandler<OnActualSongEndArgs> OnActualSongEnd;
         public event EventHandler<OnMemoryReadoutArgs> OnMemoryReadout;
 
         /// <summary>
@@ -62,7 +64,7 @@ namespace RockSnifferLib.Sniffing
         private RSMemoryReadout currentMemoryReadout = new RSMemoryReadout();
 
         /// <summary>
-        /// Keep track of timers and pause status (Second lowest non-zero value for songTimer)
+        /// Timer tracking for pause detection / game stage
         /// </summary>
         private float lowTime = float.MaxValue;
         private float initTime = float.MaxValue;
@@ -70,11 +72,21 @@ namespace RockSnifferLib.Sniffing
         private float lastTime = float.MinValue;
         private float maxTime = float.MinValue;
         private bool paused = false;
+        private bool completed = false;
+
+        // Public properties to expose completed and paused status
+        public bool Completed => completed;
+        public bool Paused => paused;
 
         /// <summary>
         /// Reference to the rocksmith process
         /// </summary>
         private readonly Process _rsProcess;
+        
+        /// <summary>
+        /// Which _edition of Rocksmith we are attached to
+        /// </summary>
+        private readonly RSEdition _edition;
 
         /// <summary>
         /// Cache to use
@@ -111,17 +123,20 @@ namespace RockSnifferLib.Sniffing
         /// </summary>
         /// <param name="rsProcess"></param>
         /// <param name="cache"></param>
-        public Sniffer(Process rsProcess, ICache cache, SnifferSettings settings = null)
+        /// <param name="edition"></param>
+        /// <param name="settings"></param>
+        public Sniffer(Process rsProcess, ICache cache, RSEdition edition, SnifferSettings? settings = null)
         {
             //Use default settings if no settings were given
-            if (settings == null) settings = new SnifferSettings();
+            settings ??= new SnifferSettings();
 
             _rsProcess = rsProcess;
             _cache = cache;
+            _edition = edition;
             _settings = settings;
 
-            //Initialise memory reader
-            memReader = new RSMemoryReader(rsProcess);
+            //Initialize memory reader
+            memReader = new RSMemoryReader(_rsProcess, _edition);
 
             OnStateChanged += Sniffer_OnStateChanged;
 
@@ -173,7 +188,7 @@ namespace RockSnifferLib.Sniffing
             else if (newState == SnifferState.IN_MENUS &&
                 oldState != SnifferState.NONE)
             {
-                OnSongEnded?.Invoke(this, new OnSongEndedArgs { song = currentCDLCDetails });
+                OnSongEnded?.Invoke(this, new OnSongEndedArgs { song = currentCDLCDetails, completed = completed, paused = paused });
             }
         }
 
@@ -209,45 +224,47 @@ namespace RockSnifferLib.Sniffing
 
                     if (newDetails != null && newDetails.IsValid())
                     {
-                        //reset timer values & pause status on song change
+                        currentCDLCDetails = _cache.Get(newReadout.songID);
+                        OnSongChanged?.Invoke(this, new OnSongChangedArgs { songDetails = currentCDLCDetails });
+                        currentCDLCDetails.Print();
+
+                        // Reset pause / timing state on song change
                         lowTime = float.MaxValue;
                         initTime = float.MaxValue;
                         pauseTime = float.MinValue;
                         lastTime = float.MinValue;
                         maxTime = float.MinValue;
                         paused = false;
-                        //Logger.Log("New Song!");
-                        currentCDLCDetails = _cache.Get(newReadout.songID);
-                        OnSongChanged?.Invoke(this, new OnSongChangedArgs { songDetails = currentCDLCDetails });
-                        currentCDLCDetails.Print();
                     }
 
                 }
 
                 newReadout.CopyTo(ref currentMemoryReadout);
 
-                OnMemoryReadout?.Invoke(this, new OnMemoryReadoutArgs() { memoryReadout = currentMemoryReadout });
-
-                // Find song initTime if one does not exist (second lowest songTimer value after song starts)
-                if (newReadout.songTimer > 0)
+                // Track timer behaviour for pause detection
+                if (currentMemoryReadout.songTimer > 0)
                 {
-                    // Updater the maxTimer values; pause time is two-back to prevent false alarms on micro-stutters.
+                    // Update the maxTimer chain; pauseTime is the value two steps behind the max
                     pauseTime = lastTime;
                     lastTime = maxTime;
-                    maxTime = Math.Max(lastTime, newReadout.songTimer);
+                    maxTime = Math.Max(maxTime, currentMemoryReadout.songTimer);
+
+                    // Infer initTime as the second-lowest non-zero timer value
                     if (initTime == float.MaxValue)
                     {
-                        if (newReadout.songTimer < lowTime)
+                        if (currentMemoryReadout.songTimer < lowTime)
                         {
                             initTime = lowTime;
-                            lowTime = newReadout.songTimer;
+                            lowTime = currentMemoryReadout.songTimer;
                         }
-                        else if (newReadout.songTimer < initTime && newReadout.songTimer != lowTime)
+                        else if (currentMemoryReadout.songTimer < initTime && currentMemoryReadout.songTimer != lowTime)
                         {
-                            initTime = newReadout.songTimer;
+                            initTime = currentMemoryReadout.songTimer;
                         }
                     }
                 }
+
+                OnMemoryReadout?.Invoke(this, new OnMemoryReadoutArgs() { memoryReadout = currentMemoryReadout });
 
                 //Print memreadout if debug is enabled
                 currentMemoryReadout.Print();
@@ -306,10 +323,10 @@ namespace RockSnifferLib.Sniffing
             var dirs = Directory.GetDirectories(path, "*", SearchOption.AllDirectories);
 
             // Go through all found directories
-            foreach (var dir in dirs)
+            foreach(var dir in dirs)
             {
                 // Check if path has the reparsepoint attribute (it is most likely a symlink)
-                if (new FileInfo(dir).Attributes.HasFlag(FileAttributes.ReparsePoint))
+                if(new FileInfo(dir).Attributes.HasFlag(FileAttributes.ReparsePoint))
                 {
                     Logger.Log($"Found symlink at {dir}");
                     symlinks.Add(dir);
@@ -383,7 +400,7 @@ namespace RockSnifferLib.Sniffing
             if (processingQueue.Contains(psarcFile))
             {
                 //If processing was successful, invoke event
-                if (success) OnPsarcInstalled?.Invoke(this, new OnPsarcInstalledArgs() { FilePath = psarcFile });
+                OnPsarcInstalled?.Invoke(this, new OnPsarcInstalledArgs() { FilePath = psarcFile, ParseSuccess = success });
 
                 //Remove from queue
                 processingQueue.Remove(psarcFile);
@@ -424,7 +441,7 @@ namespace RockSnifferLib.Sniffing
             Dictionary<string, SongDetails> allSongDetails;
             try
             {
-                allSongDetails = PSARCUtil.ReadPSARCHeaderData(fileInfo);
+                allSongDetails = PSARCUtil.ReadPSARCHeaderData(fileInfo, hash);
             }
             catch (Exception e)
             {
@@ -494,9 +511,81 @@ namespace RockSnifferLib.Sniffing
         /// <summary>
         /// Update the state of the sniffer
         /// </summary>
+        /// 
+        private void LogSongStartIfPossible()
+        {
+            if (currentCDLCDetails == null || !currentCDLCDetails.IsValid())
+            {
+                return;
+            }
+
+            // Find arrangement by ID
+            var arrangement = currentCDLCDetails.arrangements?
+                .FirstOrDefault(a => a.arrangementID == currentMemoryReadout.arrangementID);
+
+            if (arrangement == null)
+            {
+                return;
+            }
+
+            string path = arrangement.type;
+            string tuning = arrangement.tuning.TuningName;
+
+            Logger.Log(
+                "EVENT=START;" +
+                "artist=" + currentCDLCDetails.artistName + ";" +
+                "album=" + currentCDLCDetails.albumName + ";" +
+                "year=" + currentCDLCDetails.albumYear + ";" +
+                "song=" + currentCDLCDetails.songName + ";" +
+                "length=" + currentCDLCDetails.songLength + ";" +
+                "path=" + path + ";" +
+                "tuning=" + tuning + ";" +
+                "author=" + (currentCDLCDetails.toolkit?.author ?? "").Trim() + ";"
+            );
+            
+            // Fire event with actual gameplay start timestamp
+            var actualStartTimestamp = DateTime.Now;
+            OnActualSongStart?.Invoke(this, new OnActualSongStartArgs { 
+                song = currentCDLCDetails, 
+                timestamp = actualStartTimestamp 
+            });
+        }
+
+        private void LogSongEnd(bool completed)
+        {
+            if (currentCDLCDetails == null || !currentCDLCDetails.IsValid())
+            {
+                return;
+            }
+
+            var noteData = currentMemoryReadout.noteData;
+
+            Logger.Log(
+                "EVENT=END;" +
+                "completed=" + completed + ";" +
+                "paused=" + paused + ";" +
+                "accuracy=" + Math.Round(noteData.Accuracy, 1) + "%;" +
+                "totalNotes=" + noteData.TotalNotes + ";" +
+                "notesHit=" + noteData.TotalNotesHit + ";" +
+                "highestStreak=" + noteData.HighestHitStreak + ";"
+            );
+            
+            // Fire event with actual gameplay end timestamp
+            var actualEndTimestamp = DateTime.Now;
+            OnActualSongEnd?.Invoke(this, new OnActualSongEndArgs { 
+                song = currentCDLCDetails, 
+                timestamp = actualEndTimestamp,
+                completed = completed,
+                paused = paused
+            });
+        }
+
+        /// <summary>
+        /// Update the state of the sniffer
+        /// </summary>
         private void UpdateState()
         {
-            //Super complex state machine of state transitions
+            // Super complex state machine of state transitions
             switch (currentState)
             {
                 case SnifferState.IN_MENUS:
@@ -505,104 +594,87 @@ namespace RockSnifferLib.Sniffing
                         currentState = SnifferState.SONG_SELECTED;
                     }
                     break;
+
                 case SnifferState.SONG_SELECTED:
                     if (currentMemoryReadout.songTimer == 0)
                     {
                         currentState = SnifferState.SONG_STARTING;
                     }
 
-                    //If we somehow missed some states, skip to SONG_PLAYING
-                    //Or if the user reset
-                    if (currentMemoryReadout.songTimer > initTime)
+                    // If we somehow missed some states, skip to SONG_PLAYING
+                    // Using initTime instead of a hard-coded 1s threshold
+                    if (initTime != float.MaxValue &&
+                        currentMemoryReadout.songTimer > initTime)
                     {
                         currentState = SnifferState.SONG_PLAYING;
-
-                        // Log song information
-                        var arrangement = currentCDLCDetails.arrangements.FirstOrDefault(arrangement => arrangement.arrangementID == currentMemoryReadout.arrangementID);
-                        string path = arrangement.type;
-                        string tuning = arrangement.tuning.TuningName;
-                        Logger.Log(
-                            "EVENT=START;" +
-                            "artist=" + currentCDLCDetails.artistName + ";" +
-                            "album=" + currentCDLCDetails.albumName + ";" +
-                            "year=" + currentCDLCDetails.albumYear + ";" +
-                            "song=" + currentCDLCDetails.songName + ";" +
-                            "length=" + currentCDLCDetails.songLength + ";" +
-                            "path=" + path + ";" +
-                            "tuning=" + tuning + ";" +
-                            "author=" + currentCDLCDetails.toolkit.author + ";"
-                            );
+                        LogSongStartIfPossible();
                     }
                     break;
+
                 case SnifferState.SONG_STARTING:
-                    if (currentMemoryReadout.songTimer > initTime)
+                    if (initTime != float.MaxValue &&
+                        currentMemoryReadout.songTimer > initTime)
                     {
                         currentState = SnifferState.SONG_PLAYING;
-
-                        // Log song information
-                        var arrangement = currentCDLCDetails.arrangements.FirstOrDefault(arrangement => arrangement.arrangementID == currentMemoryReadout.arrangementID);
-                        string path = arrangement.type;
-                        string tuning = arrangement.tuning.TuningName;
-                        Logger.Log(
-                            "EVENT=START;" +
-                            "artist=" + currentCDLCDetails.artistName + ";" +
-                            "album=" + currentCDLCDetails.albumName + ";" +
-                            "year=" + currentCDLCDetails.albumYear + ";" +
-                            "song=" + currentCDLCDetails.songName + ";" +
-                            "length=" + currentCDLCDetails.songLength + ";" +
-                            "path=" + path + ";" +
-                            "tuning=" + tuning + ";" +
-                            "author=" + currentCDLCDetails.toolkit.author.Trim() + ";"
-                            );
+                        LogSongStartIfPossible();
                     }
                     break;
+
                 case SnifferState.SONG_PLAYING:
-                    //Allow .1 seconds of error margin on song ending
-                    if (currentMemoryReadout.songTimer >= currentCDLCDetails.songLength - .25f)
+                    // Allow small margin at end of song
+                    if (currentCDLCDetails != null &&
+                        currentCDLCDetails.IsValid() &&
+                        currentMemoryReadout.songTimer >= currentCDLCDetails.songLength - 0.25f)
                     {
                         currentState = SnifferState.SONG_ENDING;
                     }
 
-                    // If songTimer == pauseTime, the user must have paused!
-                    if (currentMemoryReadout.songTimer == pauseTime)
+                    // If the timer goes to 0 without reaching the end, user quit / restarted
+                    if (currentMemoryReadout.songTimer == 0 &&
+                        initTime != float.MaxValue)
+                    {
+                        // Early quit, not completed
+                        completed = false;
+
+                        LogSongEnd(completed: false);
+                        currentState = SnifferState.IN_MENUS;
+
+                        // Reset pause tracking for next run
+                        maxTime = float.MinValue;
+                        lastTime = float.MinValue;
+                        pauseTime = float.MinValue;
+                        paused = false;
+                        break;
+                    }
+
+                    // If songTimer == pauseTime, the user must have paused
+                    if (currentMemoryReadout.songTimer == pauseTime &&
+                        currentMemoryReadout.songTimer > initTime)
                     {
                         currentState = SnifferState.SONG_PAUSED;
                         Logger.Log("Song Paused!");
-
-                        // Keep track of pause status for logging purposes
                         paused = true;
                     }
                     break;
 
                 case SnifferState.SONG_PAUSED:
-
-                    //If the timer goes to below initTime, user restarted or quit!
-                    if (currentMemoryReadout.songTimer <= initTime)
+                    // If the timer drops back to (or below) initTime, treat as restart / quit
+                    if (currentMemoryReadout.songTimer <= initTime &&
+                        initTime != float.MaxValue)
                     {
                         currentState = SnifferState.IN_MENUS;
 
-                        // Output playthrough statistics to the log
-                        var arrangement = currentCDLCDetails.arrangements.FirstOrDefault(arrangement => arrangement.arrangementID == currentMemoryReadout.arrangementID);
-                        string path = arrangement.type;
-                        string tuning = arrangement.tuning.TuningName;
-                        Logger.Log(
-                            "EVENT=END;" +
-                            "completed=False;" +
-                            "paused=" + paused + ";" +
-                            "accuracy=" + Math.Round(currentMemoryReadout.noteData.Accuracy, 1) + "%;" +
-                            "totalNotes=" + currentMemoryReadout.noteData.TotalNotes + ";" +
-                            "notesHit=" + currentMemoryReadout.noteData.TotalNotesHit + ";" +
-                            "highestStreak=" + currentMemoryReadout.noteData.HighestHitStreak + ";" +
-                            ""
-                            );
+                        // Not a full completion
+                        completed = false;
 
-                        // Reset timer values, in case user restarts song
+                        LogSongEnd(completed: false);
+
+                        // Reset timers so a new run gets clean values
                         maxTime = float.MinValue;
                         lastTime = float.MinValue;
                         pauseTime = float.MinValue;
                         paused = false;
                     }
-
                     // If songTimer increases beyond pauseTime, user has resumed
                     else if (currentMemoryReadout.songTimer > pauseTime)
                     {
@@ -610,47 +682,44 @@ namespace RockSnifferLib.Sniffing
                         Logger.Log("Song Resumed!");
                     }
                     break;
+
                 case SnifferState.SONG_ENDING:
                     if (currentMemoryReadout.songTimer == 0)
                     {
+                        // Completed run
+
+                        completed = true;
+
+                        LogSongEnd(completed: true);
                         currentState = SnifferState.IN_MENUS;
 
-                        // Output playthrough statistics to the log
-                        Logger.Log(
-                            "EVENT=END;" +
-                            "completed=True;" +
-                            "paused=" + paused + ";" +
-                            "accuracy=" + Math.Round(currentMemoryReadout.noteData.Accuracy, 1) + "%;" +
-                            "totalNotes=" + currentMemoryReadout.noteData.TotalNotes + ";" +
-                            "notesHit=" + currentMemoryReadout.noteData.TotalNotesHit + ";" +
-                            "highestStreak=" + currentMemoryReadout.noteData.HighestHitStreak + ";" +
-                            ""
-                            );
-
-                        // Reset timer values, in case user restarts song
+                        // Reset pause / timing
                         maxTime = float.MinValue;
                         lastTime = float.MinValue;
                         pauseTime = float.MinValue;
                         paused = false;
                     }
                     break;
+
                 default:
                     break;
             }
 
-            //Force state to IN_MENUS if the current song details are not valid
+            // Force state to IN_MENUS if the current song details are not valid
             if (!currentCDLCDetails.IsValid())
             {
                 currentState = SnifferState.IN_MENUS;
             }
 
-            //If state changed
+            // If state changed, fire the event (this is what RockSniffer.exe / addons rely on)
             if (currentState != previousState)
             {
-                //Invoke event
-                OnStateChanged?.Invoke(this, new OnStateChangedArgs() { oldState = previousState, newState = currentState });
+                OnStateChanged?.Invoke(this, new OnStateChangedArgs()
+                {
+                    oldState = previousState,
+                    newState = currentState
+                });
 
-                //Remember previous state
                 previousState = currentState;
 
                 if (Logger.logStateMachine)
