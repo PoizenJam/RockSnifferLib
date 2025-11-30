@@ -542,12 +542,15 @@ namespace RockSnifferLib.Sniffing
                 "tuning=" + tuning + ";" +
                 "author=" + (currentCDLCDetails.toolkit?.author ?? "").Trim() + ";"
             );
-            
+
             // Fire event with actual gameplay start timestamp
             var actualStartTimestamp = DateTime.Now;
-            OnActualSongStart?.Invoke(this, new OnActualSongStartArgs { 
-                song = currentCDLCDetails, 
-                timestamp = actualStartTimestamp 
+            OnActualSongStart?.Invoke(this, new OnActualSongStartArgs
+            {
+                song = currentCDLCDetails,
+                timestamp = actualStartTimestamp,
+                path = path,      
+                tuning = tuning   
             });
         }
 
