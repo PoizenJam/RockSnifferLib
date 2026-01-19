@@ -1,4 +1,4 @@
-﻿using Rocksmith2014PsarcLib.Psarc;
+using Rocksmith2014PsarcLib.Psarc;
 using Rocksmith2014PsarcLib.Psarc.Asset;
 using Rocksmith2014PsarcLib.Psarc.Models.Json;
 using RockSnifferLib.Logging;
@@ -218,6 +218,7 @@ namespace RockSnifferLib.RSHelpers
                             {
                                 name = arrangement.ArrangementName,
                                 arrangementID = arrangement_id,
+                                songOffset = arrangement.SongOffset,
                                 sections = sections,
                                 phraseIterations = phraseIterations,
                                 data = arrangementData,

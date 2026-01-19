@@ -3,11 +3,13 @@ using RockSnifferLib.Configuration;
 using RockSnifferLib.Events;
 using RockSnifferLib.Logging;
 using RockSnifferLib.RSHelpers;
+using RockSnifferLib.RSHelpers.NoteData;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
 
@@ -231,9 +233,9 @@ namespace RockSnifferLib.Sniffing
                         // Reset pause / timing state on song change
                         lowTime = float.MaxValue;
                         initTime = float.MaxValue;
-                        pauseTime = float.MinValue;
-                        lastTime = float.MinValue;
                         maxTime = float.MinValue;
+                        lastTime = float.MinValue;
+                        pauseTime = float.MinValue;
                         paused = false;
                     }
 
@@ -242,26 +244,19 @@ namespace RockSnifferLib.Sniffing
                 newReadout.CopyTo(ref currentMemoryReadout);
 
                 // Track timer behaviour for pause detection
-                if (currentMemoryReadout.songTimer > 0)
+                if (currentMemoryReadout.songTimer >= 0.001f)
                 {
+                    // Set initTime to the first valid timer value, plus one polling interval buffer
+                    if (lowTime == float.MaxValue || currentMemoryReadout.songTimer < lowTime)
+                    {
+                        lowTime = currentMemoryReadout.songTimer;
+                        initTime = currentMemoryReadout.songTimer + 0.101f; // ~100ms polling interval + offset for safe restart detection
+                    }
+
                     // Update the maxTimer chain; pauseTime is the value two steps behind the max
                     pauseTime = lastTime;
                     lastTime = maxTime;
                     maxTime = Math.Max(maxTime, currentMemoryReadout.songTimer);
-
-                    // Infer initTime as the second-lowest non-zero timer value
-                    if (initTime == float.MaxValue)
-                    {
-                        if (currentMemoryReadout.songTimer < lowTime)
-                        {
-                            initTime = lowTime;
-                            lowTime = currentMemoryReadout.songTimer;
-                        }
-                        else if (currentMemoryReadout.songTimer < initTime && currentMemoryReadout.songTimer != lowTime)
-                        {
-                            initTime = currentMemoryReadout.songTimer;
-                        }
-                    }
                 }
 
                 OnMemoryReadout?.Invoke(this, new OnMemoryReadoutArgs() { memoryReadout = currentMemoryReadout });
@@ -563,20 +558,40 @@ namespace RockSnifferLib.Sniffing
 
             var noteData = currentMemoryReadout.noteData;
 
-            Logger.Log(
-                "EVENT=END;" +
-                "completed=" + completed + ";" +
-                "paused=" + paused + ";" +
-                "accuracy=" + Math.Round(noteData.Accuracy, 1) + "%;" +
-                "totalNotes=" + noteData.TotalNotes + ";" +
-                "notesHit=" + noteData.TotalNotesHit + ";" +
-                "highestStreak=" + noteData.HighestHitStreak + ";"
-            );
-            
+            // Build base log message
+            StringBuilder logMessage = new StringBuilder();
+            logMessage.Append("EVENT=END;");
+            logMessage.Append($"completed={completed};");
+            logMessage.Append($"paused={paused};");
+            logMessage.Append($"accuracy={Math.Round(noteData.Accuracy, 1)}%;");
+            logMessage.Append($"totalNotes={noteData.TotalNotes};");
+            logMessage.Append($"notesHit={noteData.TotalNotesHit};");
+            logMessage.Append($"highestStreak={noteData.HighestHitStreak};");
+
+            // Add Score Attack specific stats if in Score Attack mode
+            if (currentMemoryReadout.mode == RSMode.SCOREATTACK && noteData is ScoreAttackNoteData saData)
+            {
+                logMessage.Append($"Mode=true;");
+                logMessage.Append($"TotalPerfectHits={saData.TotalPerfectHits};");
+                logMessage.Append($"PerfectPhrases={saData.PerfectPhrases};");
+                logMessage.Append($"GoodPhrases={saData.GoodPhrases};");
+                logMessage.Append($"PassedPhrases={saData.PassedPhrases};");
+                logMessage.Append($"FailedPhrases={saData.FailedPhrases};");
+                logMessage.Append($"HighestPerfectPhraseStreak={saData.HighestPerfectPhraseStreak};");
+                logMessage.Append($"HighestGoodPhraseStreak={saData.HighestGoodPhraseStreak};");
+                logMessage.Append($"HighestPassedPhraseStreak={saData.HighestPassedPhraseStreak};");
+                logMessage.Append($"HighestFailedPhraseStreak={saData.HighestFailedPhraseStreak};");
+                logMessage.Append($"CurrentScore={saData.CurrentScore};");
+                logMessage.Append($"HighestMultiplier={saData.HighestMultiplier};");
+            }
+
+            Logger.Log(logMessage.ToString());
+
             // Fire event with actual gameplay end timestamp
             var actualEndTimestamp = DateTime.Now;
-            OnActualSongEnd?.Invoke(this, new OnActualSongEndArgs { 
-                song = currentCDLCDetails, 
+            OnActualSongEnd?.Invoke(this, new OnActualSongEndArgs
+            {
+                song = currentCDLCDetails,
                 timestamp = actualEndTimestamp,
                 completed = completed,
                 paused = paused
@@ -626,7 +641,7 @@ namespace RockSnifferLib.Sniffing
                 case SnifferState.SONG_PLAYING:
                     // Allow small margin at end of song
                     if (currentCDLCDetails != null &&
-                        currentMemoryReadout.songTimer >= currentCDLCDetails.songLength - 0.25f)
+                        currentMemoryReadout.songTimer >= currentCDLCDetails.songLength - 0.201f)
                     {
                         currentState = SnifferState.SONG_ENDING;
                     }
@@ -642,6 +657,8 @@ namespace RockSnifferLib.Sniffing
                         currentState = SnifferState.IN_MENUS;
 
                         // Reset pause tracking for next run
+                        lowTime = float.MaxValue;
+                        initTime = float.MaxValue;
                         maxTime = float.MinValue;
                         lastTime = float.MinValue;
                         pauseTime = float.MinValue;
@@ -672,6 +689,8 @@ namespace RockSnifferLib.Sniffing
                         LogSongEnd(completed: false);
 
                         // Reset timers so a new run gets clean values
+                        lowTime = float.MaxValue;
+                        initTime = float.MaxValue;
                         maxTime = float.MinValue;
                         lastTime = float.MinValue;
                         pauseTime = float.MinValue;
@@ -696,6 +715,8 @@ namespace RockSnifferLib.Sniffing
                         currentState = SnifferState.IN_MENUS;
 
                         // Reset pause / timing
+                        lowTime = float.MaxValue;
+                        initTime = float.MaxValue;
                         maxTime = float.MinValue;
                         lastTime = float.MinValue;
                         pauseTime = float.MinValue;
