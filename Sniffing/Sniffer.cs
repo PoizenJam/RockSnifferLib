@@ -70,11 +70,18 @@ namespace RockSnifferLib.Sniffing
         /// </summary>
         private float lowTime = float.MaxValue;
         private float initTime = float.MaxValue;
-        private float pauseTime = float.MinValue;
-        private float lastTime = float.MinValue;
         private float maxTime = float.MinValue;
         private bool paused = false;
         private bool completed = false;
+
+        /// <summary>
+        /// Stall-counter pause detection: counts consecutive memory reads
+        /// where the song timer has not meaningfully advanced.
+        /// </summary>
+        private float lastObservedTimer = float.MinValue;
+        private int stallCount = 0;
+        private const int STALL_THRESHOLD = 2;           // consecutive stalled reads to trigger pause
+        private const float STALL_EPSILON = 0.001f;      // jitter tolerance (< 1 ms)
 
         // Public properties to expose completed and paused status
         public bool Completed => completed;
@@ -84,7 +91,7 @@ namespace RockSnifferLib.Sniffing
         /// Reference to the rocksmith process
         /// </summary>
         private readonly Process _rsProcess;
-        
+
         /// <summary>
         /// Which _edition of Rocksmith we are attached to
         /// </summary>
@@ -234,8 +241,8 @@ namespace RockSnifferLib.Sniffing
                         lowTime = float.MaxValue;
                         initTime = float.MaxValue;
                         maxTime = float.MinValue;
-                        lastTime = float.MinValue;
-                        pauseTime = float.MinValue;
+                        stallCount = 0;
+                        lastObservedTimer = float.MinValue;
                         paused = false;
                     }
 
@@ -253,10 +260,19 @@ namespace RockSnifferLib.Sniffing
                         initTime = currentMemoryReadout.songTimer + 0.101f; // ~100ms polling interval + offset for safe restart detection
                     }
 
-                    // Update the maxTimer chain; pauseTime is the value two steps behind the max
-                    pauseTime = lastTime;
-                    lastTime = maxTime;
+                    // Update max observed timer
                     maxTime = Math.Max(maxTime, currentMemoryReadout.songTimer);
+
+                    // Stall counter: if timer hasn't meaningfully advanced, increment; otherwise reset
+                    if (Math.Abs(currentMemoryReadout.songTimer - lastObservedTimer) < STALL_EPSILON)
+                    {
+                        stallCount++;
+                    }
+                    else
+                    {
+                        stallCount = 0;
+                    }
+                    lastObservedTimer = currentMemoryReadout.songTimer;
                 }
 
                 OnMemoryReadout?.Invoke(this, new OnMemoryReadoutArgs() { memoryReadout = currentMemoryReadout });
@@ -318,10 +334,10 @@ namespace RockSnifferLib.Sniffing
             var dirs = Directory.GetDirectories(path, "*", SearchOption.AllDirectories);
 
             // Go through all found directories
-            foreach(var dir in dirs)
+            foreach (var dir in dirs)
             {
                 // Check if path has the reparsepoint attribute (it is most likely a symlink)
-                if(new FileInfo(dir).Attributes.HasFlag(FileAttributes.ReparsePoint))
+                if (new FileInfo(dir).Attributes.HasFlag(FileAttributes.ReparsePoint))
                 {
                     Logger.Log($"Found symlink at {dir}");
                     symlinks.Add(dir);
@@ -544,8 +560,8 @@ namespace RockSnifferLib.Sniffing
             {
                 song = currentCDLCDetails,
                 timestamp = actualStartTimestamp,
-                path = path,      
-                tuning = tuning   
+                path = path,
+                tuning = tuning
             });
         }
 
@@ -660,18 +676,18 @@ namespace RockSnifferLib.Sniffing
                         lowTime = float.MaxValue;
                         initTime = float.MaxValue;
                         maxTime = float.MinValue;
-                        lastTime = float.MinValue;
-                        pauseTime = float.MinValue;
+                        stallCount = 0;
+                        lastObservedTimer = float.MinValue;
                         paused = false;
                         break;
                     }
 
-                    // If songTimer == pauseTime, the user must have paused
-                    if (currentMemoryReadout.songTimer == pauseTime &&
+                    // If the song timer has stalled for enough consecutive reads, the user must have paused
+                    if (stallCount >= STALL_THRESHOLD &&
                         currentMemoryReadout.songTimer > initTime)
                     {
                         currentState = SnifferState.SONG_PAUSED;
-                        Logger.Log("Song Paused!");
+                        Logger.Log("Song Paused! (timer stalled at {0:F3} for {1} reads)", currentMemoryReadout.songTimer, stallCount);
                         paused = true;
                     }
                     break;
@@ -692,12 +708,12 @@ namespace RockSnifferLib.Sniffing
                         lowTime = float.MaxValue;
                         initTime = float.MaxValue;
                         maxTime = float.MinValue;
-                        lastTime = float.MinValue;
-                        pauseTime = float.MinValue;
+                        stallCount = 0;
+                        lastObservedTimer = float.MinValue;
                         paused = false;
                     }
-                    // If songTimer increases beyond pauseTime, user has resumed
-                    else if (currentMemoryReadout.songTimer > pauseTime)
+                    // If songTimer is advancing again (stall counter reset), user has resumed
+                    else if (stallCount == 0 && currentMemoryReadout.songTimer > initTime)
                     {
                         currentState = SnifferState.SONG_PLAYING;
                         Logger.Log("Song Resumed!");
@@ -718,8 +734,8 @@ namespace RockSnifferLib.Sniffing
                         lowTime = float.MaxValue;
                         initTime = float.MaxValue;
                         maxTime = float.MinValue;
-                        lastTime = float.MinValue;
-                        pauseTime = float.MinValue;
+                        stallCount = 0;
+                        lastObservedTimer = float.MinValue;
                         paused = false;
                     }
                     break;
