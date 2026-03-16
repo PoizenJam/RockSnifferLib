@@ -80,8 +80,9 @@ namespace RockSnifferLib.Sniffing
         /// </summary>
         private float lastObservedTimer = float.MinValue;
         private int stallCount = 0;
-        private const int STALL_THRESHOLD = 2;           // consecutive stalled reads to trigger pause
+        private const int STALL_THRESHOLD = 5;           // consecutive stalled reads to trigger pause
         private const float STALL_EPSILON = 0.001f;      // jitter tolerance (< 1 ms)
+        private const float END_OF_SONG_PAUSE_GUARD = 2.0f; // suppress pause detection within last N seconds of song
 
         // Public properties to expose completed and paused status
         public bool Completed => completed;
@@ -683,8 +684,12 @@ namespace RockSnifferLib.Sniffing
                     }
 
                     // If the song timer has stalled for enough consecutive reads, the user must have paused
+                    // Suppress near end of song — the game engine often stalls the timer briefly
+                    // during end-of-song transition (score screen prep) before reaching songLength
                     if (stallCount >= STALL_THRESHOLD &&
-                        currentMemoryReadout.songTimer > initTime)
+                        currentMemoryReadout.songTimer > initTime &&
+                        !(currentCDLCDetails != null &&
+                          currentMemoryReadout.songTimer >= currentCDLCDetails.songLength - END_OF_SONG_PAUSE_GUARD))
                     {
                         currentState = SnifferState.SONG_PAUSED;
                         Logger.Log("Song Paused! (timer stalled at {0:F3} for {1} reads)", currentMemoryReadout.songTimer, stallCount);
