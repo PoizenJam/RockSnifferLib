@@ -91,7 +91,7 @@ namespace RockSnifferLib.RSHelpers
                     Logger.LogError("Warning! Could not parse psarc file {0}: {1}", fileInfo.Name, e.Message);
                     return null;
                 }
-                
+
                 //Extract all arrangements
                 foreach (var v in manifests)
                 {
@@ -190,7 +190,7 @@ namespace RockSnifferLib.RSHelpers
 
 
                             //Get a list of all phraseIterations
-                            List<ArrangementDetails.PhraseIterationDetails> phraseIterations =[];
+                            List<ArrangementDetails.PhraseIterationDetails> phraseIterations = [];
                             Dictionary<string, int> phraseIterationCounts = [];
 
                             foreach (var phrI in arrangement.PhraseIterations)
@@ -241,6 +241,7 @@ namespace RockSnifferLib.RSHelpers
                             }
 
                             arrangementDetails.tuning = new ArrangementTuning(arrangement.Tuning, (int)arrangement.CentOffset, (int)arrangement.CapoFret);
+                            arrangementDetails.tuning.IsBass = (arrangementDetails.type == "Bass");
 
 
                             //file hash
