@@ -91,7 +91,7 @@ namespace RockSnifferLib.RSHelpers
                     Logger.LogError("Warning! Could not parse psarc file {0}: {1}", fileInfo.Name, e.Message);
                     return null;
                 }
-
+                
                 //Extract all arrangements
                 foreach (var v in manifests)
                 {
@@ -226,19 +226,19 @@ namespace RockSnifferLib.RSHelpers
                                 isAlternateArrangement = (arrangement.ArrangementProperties.Represent == 0)
                             };
 
-                            //Determine path type
-                            if (arrangement.ArrangementProperties.PathLead == 1)
-                            {
-                                arrangementDetails.type = "Lead";
-                            }
-                            else if (arrangement.ArrangementProperties.PathRhythm == 1)
-                            {
-                                arrangementDetails.type = "Rhythm";
-                            }
-                            else if (arrangement.ArrangementProperties.PathBass == 1)
-                            {
-                                arrangementDetails.type = "Bass";
-                            }
+                        //Determine path type
+                        if (arrangement.ArrangementProperties.PathLead == 1)
+                        {
+                            arrangementDetails.type = "Lead";
+                        }
+                        else if (arrangement.ArrangementProperties.PathRhythm == 1)
+                        {
+                            arrangementDetails.type = "Rhythm";
+                        }
+                        else if (arrangement.ArrangementProperties.PathBass == 1)
+                        {
+                            arrangementDetails.type = "Bass";
+                        }
 
                             arrangementDetails.tuning = new ArrangementTuning(arrangement.Tuning, (int)arrangement.CentOffset, (int)arrangement.CapoFret);
                             arrangementDetails.tuning.IsBass = (arrangementDetails.type == "Bass");

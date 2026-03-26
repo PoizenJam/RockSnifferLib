@@ -92,6 +92,11 @@ namespace RockSnifferLib.Sniffing
         /// Reference to the rocksmith process
         /// </summary>
         private readonly Process _rsProcess;
+        
+        /// <summary>
+        /// Which _edition of Rocksmith we are attached to
+        /// </summary>
+        private readonly RSEdition _edition;
 
         /// <summary>
         /// Which _edition of Rocksmith we are attached to
