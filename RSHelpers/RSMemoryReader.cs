@@ -61,12 +61,9 @@ namespace RockSnifferLib.RSHelpers
                     //Remove Play_ prefix and _Preview or _Invalid suffix
                     string song_id = preview_name.Substring(5, preview_name.Length - 13);
 
-                    // RESET arrangementID ON SONG-ID CHANGE (v0.6.5):
-                    // The internal `readout` field persists across DoReadout calls. Without
-                    // this reset, a valid hash from the PREVIOUS song lingers in
-                    // readout.arrangementID even after the user has navigated to a different
-                    // song — leading to stale-arrangement reports during menu browsing. We
-                    // null it here so the next memory read for the new song starts fresh.
+                    // Reset arrangementID on songID change: `readout` persists across DoReadout
+                    // calls, and a valid hash from the previous song would otherwise linger and
+                    // produce stale-arrangement reports during menu browsing.
                     if (readout.songID != song_id)
                     {
                         readout.arrangementID = null;
@@ -80,29 +77,16 @@ namespace RockSnifferLib.RSHelpers
             // SONG TIMER
             ReadSongTimer(FollowPointers(MemoryOffsets.GetSongTimerPointer(edition)));
 
-            // GAME STAGE
+            // GAME STAGE — must be resolved before ARRANGEMENT ID (the arrangement read
+            // dispatches by gameStage). Static-address read; the buffer at module+0xF5F7C9
+            // (Remastered) is Rocksmith's canonical gameStage cell — see
+            // MemoryOffsets.GetCurrentMenuPointer.
             //
-            // (Moved above ARRANGEMENT ID in v0.6.8 — the arrangement-id read now
-            // dispatches by gameStage, so gameStage must be resolved first. Pre-v0.6.8
-            // these two blocks were in the reverse order; no semantic change beyond
-            // the dispatch requirement.)
+            // Length >= 4 guard filters transient sub-4-char writes during stage transitions.
             //
-            // Static address read (v0.6.6) — see MemoryOffsets.GetCurrentMenuPointer
-            // for the discovery story and full migration notes. Briefly: replaces
-            // a pointer chain that returned garbage in several menu states (SA
-            // song-select, song-options, tuner) and silently dropped LaS / Nonstop
-            // pause stages entirely. The static buffer at module+0xF5F7C9
-            // (Remastered) is Rocksmith's canonical gameStage cell.
-            //
-            // Length >= 4 guard: kept from the prior implementation as a defense
-            // against transient sub-4-char writes during stage transitions. With
-            // the static read this is rarely if ever exercised, but harmless.
-            //
-            // KNOWN: gameStage will NOT update on pause→resume or pause→restart
-            // for any mode. This is Rocksmith engine behavior, not a reader bug.
-            // Consumers needing actual play/pause state should use `game_state`
-            // (SnifferState), which derives play/pause via timer-stall detection
-            // in Sniffer.UpdateState().
+            // KNOWN: gameStage does NOT update on pause→resume or pause→restart for any
+            // mode (engine behavior, not a reader bug). Consumers needing play/pause state
+            // should use game_state (SnifferState).
             string game_stage = MemoryHelper.ReadStringFromMemory(rsProcessHandle, FollowPointers(MemoryOffsets.GetCurrentMenuPointer(edition)));
 
             //If we got a game stage
@@ -115,99 +99,45 @@ namespace RockSnifferLib.RSHelpers
                 }
             }
 
-            // MODE (v0.6.8)
+            // MODE — derived from gameStage (reliable across all states); see
+            // DeriveModeFromGameStage for the mapping table.
             //
-            // Derive readout.mode from gameStage. The pre-v0.6.8 behavior set mode
-            // from whichever note-data pointer chain resolved (LEARNASONG when LaS
-            // chain matched, SCOREATTACK when SA chain matched, UNKNOWN otherwise),
-            // which had three problems:
-            //   1. Nonstop Play uses the same note-data subsystem as LaS internally,
-            //      so NSP gameplay reported "LEARNASONG" indistinguishable from LaS.
-            //   2. Menu states (mainmenu, song-select, song-review, etc.) reported
-            //      "UNKNOWN" because no note-data pointer resolves there.
-            //   3. The classification was implicitly tied to note-data resolution,
-            //      coupling two unrelated concerns.
-            //
-            // v0.6.8 derives mode from gameStage, which is reliable across all
-            // states (static-address read since v0.6.6) and gives every gameStage
-            // a meaningful classification. See DeriveModeFromGameStage for the
-            // full mapping table.
-            //
-            // SPECIAL CASE — bare "tuner" gameStage:
-            // The bare "tuner" stage fires whenever the universal tuner is invoked
-            // from a parent context (pause menu of any mode, main menu, Session
-            // mode, etc.) — distinct from the mode-specific tuners (las_tuner,
-            // nsp_tuner, scoreattack_presongtuner, getuner, pregametuner,
-            // guitarcade_tuner) that trigger between menu and gameplay if tuning
-            // is needed. Mode-specific tuners are classified under their parent
-            // mode by DeriveModeFromGameStage. The bare "tuner" is stateless from
-            // the gameStage alone — to give consumers a useful mode value, we
-            // persist whatever readout.mode was on the previous poll (effectively
-            // "ignore tuner as a state transition for mode-classification purposes").
-            // Edge case: if the very first observed gameStage after RockSniffer
-            // attaches is the bare tuner, readout.mode starts at UNKNOWN and stays
-            // there until the user navigates away — graceful degradation.
+            // SPECIAL CASE — bare "tuner": fires when the universal tuner is invoked from
+            // any parent context (pause menu, main menu, Session, ...), unlike the
+            // mode-specific tuners (las_tuner, nsp_tuner, scoreattack_presongtuner,
+            // getuner, pregametuner, guitarcade_tuner), which classify under their parent
+            // mode. The bare stage is stateless, so persist the previous poll's mode
+            // instead of reclassifying. Edge case: if the first observed gameStage after
+            // attach is the bare tuner, mode stays UNKNOWN until the user navigates away.
             if (!string.Equals(readout.gameStage, "tuner", StringComparison.OrdinalIgnoreCase))
             {
                 readout.mode = DeriveModeFromGameStage(readout.gameStage);
             }
 
-            // ARRANGEMENT ID
+            // ARRANGEMENT ID — dispatch by gameStage. Two chains expose arrangement-id data:
             //
-            // Dispatch by gameStage (v0.6.8). Two memory chains expose arrangement-id
-            // data in different states:
+            //   PLAY_arrID chain (MemoryOffsets.GetPlayArrIDPointer): 16-byte raw GUID in
+            //   Microsoft LE layout, converted via new Guid(bytes).ToString("N")
+            //   .ToUpperInvariant() to match songDetails.arrangements[].arrangementID.
+            //   Used for las_game / las_pause / nonstopplaygame / nsp_pause. In LaS it is
+            //   cross-validated identical to arrangement_hash; in Nonstop it is the only
+            //   chain that populates.
             //
-            //   PLAY_arrID chain (v0.6.8 — MemoryOffsets.GetPlayArrIDPointer):
-            //     Reads a 16-byte raw GUID in Microsoft LE layout, converts to the
-            //     standard 32-char uppercase hex form via
-            //         new Guid(bytes).ToString("N").ToUpperInvariant()
-            //     for comparison against songDetails.arrangements[].arrangementID.
-            //     Used for:
-            //       las_game / las_pause        — Learn-A-Song gameplay and pause
-            //       nonstopplaygame / nsp_pause — Nonstop Play gameplay and pause
-            //     For LaS the chain is interchangeable with arrangement_hash (cross-
-            //     validated identical output during discovery) and v0.6.8 consolidates
-            //     on it. For Nonstop this is the v0.6.8 fix target — it finally
-            //     provides per-arrangement resolution in Nonstop, where the legacy
-            //     arrangement_hash chain never populated.
+            //   arrangement_hash chain (legacy): 32-char ASCII hex string. Used for
+            //   sa_game / sa_pause (Score Attack has its own subsystem — PLAY_arrID does
+            //   not track it) and all other gameStages, where it may return junk or stale
+            //   values.
             //
-            //   arrangement_hash chain (legacy — MemoryOffsets.GetArrangementHashPointer):
-            //     Reads a 32-char ASCII hex string directly from memory. Used for:
-            //       sa_game / sa_pause — Score Attack has its own subsystem; PLAY_arrID
-            //                            does NOT track it. The legacy chain handles
-            //                            SA correctly and must remain in use.
-            //       All other gameStages — preserves pre-v0.6.8 behavior in menu /
-            //                              song-select / song-review / transition
-            //                              states. May return junk or stale values
-            //                              in those states; filtered the same way as
-            //                              in v0.6.7 (see VALIDATION below). Worth
-            //                              revisiting in a future cleanup pass once
-            //                              PLAY_arrID has soaked in the field, but
-            //                              explicitly out of scope for v0.6.8.
+            // FORMAT VALIDATION: IsValidArrangementHash rejects null/empty/wrong-length
+            // and non-hex — catches uninitialized-memory garbage (song titles, URN
+            // fragments) and all-zero / unresolved PLAY_arrID reads (e.g. Nonstop carousel).
             //
-            // FORMAT VALIDATION (v0.6.5, retained):
-            // IsValidArrangementHash rejects null/empty/wrong-length strings and any
-            // non-hex character. Catches structural garbage from either chain — for
-            // arrangement_hash this is the longstanding case of un-initialized memory
-            // returning song titles or album-art URN fragments; for PLAY_arrID it
-            // catches all-zero or unresolved-chain reads (e.g. between songs in
-            // Nonstop carousel where the chain may resolve but the cell isn't
-            // populated yet).
+            // CANDIDATE VALIDATION (Sniffer.cs cross-reference): nulls format-valid but
+            // song-mismatched IDs. Chain-agnostic.
             //
-            // CANDIDATE VALIDATION (v0.6.5, at Sniffer.cs lines 394-410, unchanged):
-            // Cross-references readout.arrangementID against currentCDLCDetails.
-            // arrangements[] and nulls it on no-match. Catches format-valid but
-            // song-mismatched IDs (stale values from previously-played or browsed
-            // songs persisting in the read cell). Chain-agnostic — applies equally
-            // to both PLAY_arrID and arrangement_hash output, because both produce
-            // 32-char hex strings consumed identically downstream.
-            //
-            // PERSISTENCE: readout.arrangementID is persistent across DoReadout calls
-            // until either (a) the songID changes (resetting it to null at the top of
-            // DoReadout) or (b) a fresh read here passes IsValidArrangementHash and
-            // overwrites it. On a bad read either chain produces null/invalid; the
-            // field retains its prior good value and the next poll re-attempts. Same
-            // "fail then retry" pattern as v0.6.7.
+            // PERSISTENCE: readout.arrangementID persists across DoReadout calls until the
+            // songID changes (reset at the top of DoReadout) or a fresh valid read
+            // overwrites it — a bad read retains the prior good value and retries next poll.
             bool usePlayArrIDChain = readout.gameStage == "las_game"
                                   || readout.gameStage == "las_pause"
                                   || readout.gameStage == "nonstopplaygame"
@@ -231,23 +161,11 @@ namespace RockSnifferLib.RSHelpers
                 readout.arrangementID = resolved_arrangement_id;
             }
 
-            // CURRENT PATH (v0.6.5 hotfix5)
-            //
-            // The user's currently-selected Path (arrangement type) at the menu level.
-            // 1-byte enum at a stable address. Populated essentially from Rocksmith launch
-            // (defaults to 0x01 / Lead) and only updates when the user actively switches
-            // Path in options or song-select. Persistent across all gameStages and game
-            // states. Crucially works in Nonstop Play, where arrangement_hash fails.
-            //
-            // Value mapping: 0x01=Lead, 0x02=Rhythm, 0x04=Bass. Anything else => Unknown
-            // (treated as empty string so the resolution chain in Sniffer.cs falls through
-            // to the heuristic-based fallbacks).
-            //
-            // Wrapped in try/catch because IF the pointer chain ever returns IntPtr.Zero
-            // (unlikely given how stable this address is, but possible during process
-            // tear-down or mid-launch races), ReadByteFromMemory would throw on the
-            // resulting null read. Keeping path-resolution failures non-fatal keeps the
-            // rest of the readout flowing.
+            // CURRENT PATH — the user's currently-selected Path (arrangement type) at the
+            // menu level. 1-byte enum at a stable address, populated from launch (defaults
+            // 0x01/Lead), mutated only when the user switches Path. Works in Nonstop Play,
+            // where arrangement_hash fails. Mapping: 0x01=Lead, 0x02=Rhythm, 0x04=Bass,
+            // else Unknown (empty string, so Sniffer.cs falls through to heuristics).
             try
             {
                 IntPtr pathAddr = FollowPointers(MemoryOffsets.GetCurrentPathPointer(edition));
@@ -271,25 +189,12 @@ namespace RockSnifferLib.RSHelpers
                 // but defensive coding keeps a transient memory hiccup from killing the poll.
             }
 
-            // PAUSE MENU MODE (v0.6.7)
-            //
-            // Direct read of Rocksmith's pause-menu mode byte — a static .data
-            // cell at module+0xF5F5FC (Remastered) that encodes blocking-overlay
-            // depth: 0=no overlay, 1=sub-overlay (e.g. tuner-from-pause),
-            // 2=top-level overlay (pause menu, Mixer, Tools menu). See
-            // MemoryOffsets.GetPauseMenuModePointer for the full state table
-            // and discovery context.
-            //
-            // Cross-mode validated (SA, LaS, NSP, Guitarcade) and verified to
-            // survive game relaunch as a true static. Used by Sniffer.UpdateState
-            // for first-poll-instant SONG_PLAYING ↔ SONG_PAUSED transitions,
-            // replacing the prior timer-stall heuristic.
-            //
-            // Defensive try/catch around the read, same pattern as currentPath
-            // above — keeps a transient memory hiccup from killing the poll.
-            // On failure, pauseMenuMode stays at its prior value (or 0 on
-            // first poll) and the next successful poll resyncs. isPaused
-            // is always derived from pauseMenuMode in lock-step.
+            // PAUSE MENU MODE — direct read of the static byte at module+0xF5F5FC
+            // (Remastered): 0=no overlay, 1=sub-overlay (tuner-from-pause), 2=top-level
+            // overlay (pause menu, Mixer, Tools). Cross-mode validated, survives relaunch
+            // as a true static. Used by Sniffer.UpdateState for flag-driven SONG_PLAYING ↔
+            // SONG_PAUSED transitions. See MemoryOffsets.GetPauseMenuModePointer for the
+            // full table and caveats.
             try
             {
                 IntPtr pauseModeAddr = FollowPointers(MemoryOffsets.GetPauseMenuModePointer(edition));
@@ -321,12 +226,9 @@ namespace RockSnifferLib.RSHelpers
             {
                 //Score attack
                 ReadScoreAttackNoteData(FollowPointers(MemoryOffsets.GetScoreAttackNoteDataPointer(edition)));
-                // (v0.6.8) The legacy `readout.mode = RSMode.UNKNOWN` fallback when
-                // neither note-data chain resolved was removed. Mode is no longer
-                // tied to note-data resolution — it's derived from gameStage by
-                // DeriveModeFromGameStage in DoReadout. Note-data dispatch here
-                // just decides which struct shape to read; UNKNOWN as a fallback
-                // would now incorrectly clobber a gameStage-derived menu mode.
+                // No UNKNOWN fallback here: mode is derived from gameStage in DoReadout, and
+                // note-data dispatch only decides which struct shape to read — an UNKNOWN
+                // write would clobber a gameStage-derived menu mode.
             }
 
             //Copy over everything when a song is running
@@ -355,30 +257,16 @@ namespace RockSnifferLib.RSHelpers
             prevReadout.pauseMenuMode = readout.pauseMenuMode;
             prevReadout.isPaused = readout.isPaused;
 
-            // Always propagate mode (v0.6.8):
-            // Pre-v0.6.8, mode was set inside ReadNoteData / ReadScoreAttackNoteData
-            // and only reached prevReadout via the in-song CopyTo block above
-            // (gated on songTimer > 0). That was sufficient when mode was only
-            // meaningful during gameplay. v0.6.8 derives mode from gameStage
-            // and gives every gameStage (menus, song-select, transitions, etc.)
-            // a meaningful classification — so mode now needs the same always-
-            // propagate treatment that gameStage / currentPath / pauseMenuMode
-            // already get. Without this, prevReadout.mode would retain the last
-            // in-song value through every menu state until the next gameplay
-            // session, defeating the entire point of the v0.6.8 redesign.
+            // Always propagate mode: every gameStage (menus, transitions, ...) has a
+            // meaningful classification, so mode gets the same always-propagate treatment
+            // as gameStage / currentPath / pauseMenuMode. Otherwise prevReadout.mode would
+            // retain the last in-song value through every menu state.
             prevReadout.mode = readout.mode;
 
-            // Always propagate arrangementID (v0.6.5):
-            // The previous behavior of only updating arrangementID when songTimer > 0
-            // caused two problems:
-            //   (1) When the user picked an arrangement in the LaS song-options screen
-            //       (songTimer is 0), the new arrangement_hash never reached prevReadout.
-            //       LogSongStartIfPossible then fired with stale data.
-            //   (2) When the Sniffer.cs cross-reference cleared prevReadout.arrangementID
-            //       (because of a stale value), nothing re-populated it from `readout`
-            //       on the next poll until songTimer > 0 — perpetuating the null state.
-            // Always propagating means the cross-reference clearing is per-poll only;
-            // the next memory read can resupply a valid value immediately.
+            // Always propagate arrangementID: gating on songTimer > 0 (a) missed
+            // arrangement picks made in song-options (timer 0), letting START fire with
+            // stale data, and (b) left the field null after a cross-reference clear until
+            // the next in-song poll. Always propagating makes the clear per-poll only.
             prevReadout.arrangementID = readout.arrangementID;
 
             return prevReadout;
@@ -413,13 +301,10 @@ namespace RockSnifferLib.RSHelpers
         }
 
         /// <summary>
-        /// Classifies a Rocksmith gameStage string into an RSMode value (v0.6.8).
-        ///
-        /// gameStage is the canonical source of truth for what the user is currently
-        /// doing in the game (see MemoryOffsets.GetCurrentMenuPointer for the read).
-        /// This classifier maps the observed gameStages into mode buckets that
-        /// addons and downstream consumers can reason about without needing to know
-        /// every individual stage name.
+        /// Classifies a Rocksmith gameStage string into an RSMode value. gameStage is
+        /// the canonical source of truth for what the user is doing in the game (see
+        /// MemoryOffsets.GetCurrentMenuPointer); this maps the observed stages into
+        /// mode buckets consumers can reason about.
         ///
         /// MAPPING TABLE (exact-match first, then prefix fallback):
         ///
@@ -431,10 +316,9 @@ namespace RockSnifferLib.RSHelpers
         ///     exact: scoreattack, panel_bib, scoreattack_presongtuner,
         ///            sa_game, sa_pause, sa_songreview
         ///
-        ///   GUITARCADE  (Score Attack is conceptually a subset of Guitarcade,
-        ///                but classified separately above when the user is in
-        ///                an SA-specific stage; Guitarcade catches the hub and
-        ///                its other minigames)
+        ///   GUITARCADE  (SA is conceptually a subset of Guitarcade, but classified
+        ///                separately above when in an SA-specific stage; Guitarcade
+        ///                catches the hub and its other minigames)
         ///     exact: gcpre, gcade, gcade_game, guitarcade_tuner
         ///     prefix: gc_
         ///
@@ -449,30 +333,21 @@ namespace RockSnifferLib.RSHelpers
         ///     exact: getuner, pregametuner
         ///     prefix: ge_   (e.g. ge_techniquehub, ge_game, ge_pause)
         ///
-        ///   MULTIPLAYER  (full multiplayer support is a larger future effort —
-        ///                 multiple user-note-data and per-user arrangements
-        ///                 to track. This classification is a tag only.)
+        ///   MULTIPLAYER  (classification tag only — full MP support is a separate
+        ///                 larger effort)
         ///     exact: split_game
         ///     prefix: mp_, duet_, h2h_
         ///
-        ///   MENU  (top-level / utility screens not associated with any single
-        ///          gameplay mode)
+        ///   MENU  (top-level / utility screens not tied to any single gameplay mode)
         ///     exact: titlescreen, profileselect, main, mainmenu, statsmenu,
         ///            shop, contentpanelchord, sidelist
         ///     prefix: tonedesigner
         ///
         ///   UNKNOWN  — everything else (defensive default)
         ///
-        /// CASE-INSENSITIVITY: the input is lowercased once at the top of this
-        /// method. The match-tables below are written in lowercase. Rocksmith's
-        /// observed gameStages are always lowercase in practice, but the
-        /// normalization protects against any future build / mod variation.
-        ///
-        /// SPECIAL CASE — bare "tuner": NOT handled here. The bare-tuner stage
-        /// is meant to persist whatever the prior mode was (see DoReadout for
-        /// the wrapper logic). If "tuner" reaches this method (via some future
-        /// call site that doesn't apply the special case), it falls through
-        /// to UNKNOWN as a defensive default.
+        /// Input is lowercased once at the top; match tables are lowercase. The bare
+        /// "tuner" stage is NOT handled here — DoReadout persists the prior mode for
+        /// it; if it reaches this method it falls through to UNKNOWN.
         /// </summary>
         private static RSMode DeriveModeFromGameStage(string gameStage)
         {
@@ -597,30 +472,11 @@ namespace RockSnifferLib.RSHelpers
         }
 
         /// <summary>
-        /// Reads 16 raw bytes from the PLAY_arrID chain (v0.6.8) and converts them
-        /// to the canonical 32-char uppercase hex string format that matches the
-        /// layout of songDetails.arrangements[].arrangementID.
-        ///
-        /// The bytes are interpreted as a Microsoft GUID — first 3 fields in
-        /// little-endian byte order, last 8 bytes sequential — via the .NET
-        /// Guid(byte[]) constructor. ToString("N") returns the GUID as 32 hex
-        /// chars with no separators; ToUpperInvariant normalizes case for the
-        /// case-sensitive cross-reference at Sniffer.cs lines 394-410.
-        ///
-        /// Returns null on:
-        ///   - IntPtr.Zero from FollowPointers (chain broken — should not happen
-        ///     in the four dispatched gameStages where the chain has been validated
-        ///     stable, but defensively handled to keep failures non-fatal).
-        ///   - Any exception during the byte read or GUID construction. Guarded
-        ///     defensively for parity with the v0.6.7 currentPath and pauseMenuMode
-        ///     reads — under normal operation ReadBytesFromMemory always returns a
-        ///     16-byte buffer and new Guid(byte[16]) does not throw, so this catch
-        ///     is for transient memory hiccups during process tear-down or attach
-        ///     races, not expected steady-state behavior.
-        ///
-        /// A null return causes DoReadout to leave readout.arrangementID at its
-        /// prior value (existing v0.6.5 "fail then retry on next poll" semantics
-        /// from the conditional IsValidArrangementHash assignment).
+        /// Reads 16 raw bytes from the PLAY_arrID chain and converts them to the
+        /// 32-char uppercase hex form matching songDetails.arrangements[].arrangementID
+        /// (Microsoft GUID layout via the Guid(byte[]) constructor; ToString("N") +
+        /// ToUpperInvariant for the case-sensitive cross-reference in Sniffer.cs).
+        /// Returns null when the chain is broken or the bytes are unreadable.
         /// </summary>
         private string ReadPlayArrIDFromMemory(IntPtr address)
         {
@@ -662,11 +518,8 @@ namespace RockSnifferLib.RSHelpers
                 return false;
             }
 
-            // (v0.6.8) The legacy `readout.mode = RSMode.LEARNASONG` write here was
-            // removed: mode is now derived from gameStage by DeriveModeFromGameStage
-            // (see DoReadout). This method continues to read the LaS note-data struct,
-            // but mode classification is no longer coupled to which note-data pointer
-            // happened to resolve in this poll.
+            // mode is derived from gameStage in DoReadout; this method only reads the LaS
+            // note-data struct.
 
             //Read note data
             readout.noteData = MemoryHelper.ReadStructureFromMemory<LearnASongNoteData>(rsProcessHandle, structAddress);
@@ -689,10 +542,8 @@ namespace RockSnifferLib.RSHelpers
                 return false;
             }
 
-            // (v0.6.8) The legacy `readout.mode = RSMode.SCOREATTACK` write here was
-            // removed for the same reason as in ReadNoteData. SA note-data continues
-            // to be read for the note-data struct; mode is now set by
-            // DeriveModeFromGameStage in DoReadout.
+            // mode is derived from gameStage in DoReadout; this method only reads the SA
+            // note-data struct.
 
             //Read note data
             readout.noteData = MemoryHelper.ReadStructureFromMemory<ScoreAttackNoteData>(rsProcessHandle, structAddress);

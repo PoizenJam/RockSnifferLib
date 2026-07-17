@@ -7,23 +7,10 @@ using System.Threading.Tasks;
 namespace RockSnifferLib.RSHelpers
 {
     /// <summary>
-    /// Classification of the user's current Rocksmith mode-context.
-    ///
-    /// Pre-v0.6.8: this enum was set only when a note-data pointer chain
-    /// resolved (LEARNASONG / SCOREATTACK), so menu states and Nonstop Play
-    /// were misclassified (Nonstop reuses the LaS note-data subsystem
-    /// internally, so it appeared as LEARNASONG; menus appeared as UNKNOWN
-    /// because no note-data pointer resolves in them).
-    ///
-    /// v0.6.8: mode is derived from `gameStage` (via DeriveModeFromGameStage
-    /// in RSMemoryReader), which is reliable across all states including
-    /// menus, song-select, song-review, transitions, and Nonstop Play.
-    /// The note-data pointer reads still happen for the note data itself,
-    /// but no longer write `mode`.
-    ///
-    /// Integer values 0..3 are preserved from the pre-v0.6.8 enum for any
-    /// external consumer doing integer-based serialization. New values
-    /// (NONSTOPPLAY onwards) are appended.
+    /// Classification of the user's current Rocksmith mode-context, derived from
+    /// gameStage (see RSMemoryReader.DeriveModeFromGameStage) — reliable across all
+    /// states including menus, song-select, song-review, transitions, and Nonstop
+    /// Play. Integer values 0..3 are preserved for external consumers.
     /// </summary>
     public enum RSMode
     {

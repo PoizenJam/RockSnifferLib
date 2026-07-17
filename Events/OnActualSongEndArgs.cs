@@ -16,17 +16,12 @@ namespace RockSnifferLib.Events
         public string arrangementID;
         public string path;
         public string tuning;
-        // True if the song was started while Rocksmith was in a Nonstop Play gameStage.
-        // Captured at song START in Sniffer.cs and preserved through end (via the run-context
-        // fields). Pre-v0.6.8 gated playthrough writes; v0.6.8 lifted that gate once
-        // PLAY_arrID resolved Nonstop arrangement-ID reliably. Field preserved for
-        // any downstream consumer that wants the contextual flag.
+        // True if the song was started in a Nonstop Play gameStage. Captured at song
+        // start in Sniffer.cs and preserved through end. Informational only.
         public bool wasNonstopMode;
-        // (v0.6.8) True if the song was started while Rocksmith was in a Multiplayer
-        // gameStage. Captured at song start in Sniffer.cs and propagated through end
-        // so PlaythroughHistory.OnActualSongEnd can gate writes — multi-user note
-        // data and per-user arrangements aren't tracked yet, so MP rows would have
-        // quality issues. See OnActualSongStartArgs for the full rationale.
+        // True if the song was started in a Multiplayer gameStage. Captured at start
+        // and propagated through end so PlaythroughHistory can gate writes — multi-user
+        // note data isn't tracked.
         public bool wasMultiplayerMode;
         // Snapshot of the memory readout at the moment of LogSongEnd. Allows the
         // playthrough history layer to read accurate end-of-song noteData even if

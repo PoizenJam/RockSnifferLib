@@ -79,99 +79,49 @@ namespace RockSnifferLib.Sniffing
         /// where the song timer has not meaningfully advanced.
         /// </summary>
         private float lastObservedTimer = float.MinValue;
-        // stallCount and STALL_THRESHOLD removed in v0.6.7 — pause entry/exit now
-        // flag-driven via RSMemoryReadout.pauseMenuMode (see
-        // MemoryOffsets.GetPauseMenuModePointer). STALL_EPSILON and
-        // END_OF_SONG_PAUSE_GUARD likewise removed; the flag is authoritative
-        // regardless of timer position so end-of-song stall false-positives
-        // can't happen. lastObservedTimer is retained for diagnostic logging
-        // purposes only — no logic branches on it post-migration.
+        // lastObservedTimer is retained for diagnostic logging only; pause detection
+        // is flag-driven via RSMemoryReadout.pauseMenuMode.
 
         /// <summary>
-        /// Snapshot of songTimer at the moment SONG_PAUSED was entered (v0.6.7).
-        ///
-        /// Used by the SONG_PAUSED → SONG_PLAYING resume detection to
-        /// distinguish "user resumed the song" (timer moves) from "user
-        /// hit Exit from the pause menu" (timer stays frozen at the
-        /// pause-point until the engine transitions back to menus).
-        ///
-        /// Without this disambiguation, the moment the user hits Exit
-        /// from the pause menu, pauseMenuMode flips to 0 (engine clears
-        /// the overlay) while songTimer is still frozen above initTime —
-        /// causing a brief spurious SONG_PAUSED → SONG_PLAYING flicker
-        /// before the songTimer-drops-to-0 branch fires SONG_PAUSED →
-        /// IN_MENUS one or two polls later.
-        ///
-        /// Resume is now detected on `songTimer != pauseTimerSnapshot`
-        /// (any movement away from the pause point — Rocksmith may
-        /// rewind ~0.5s on resume for "catch up", so != is correct
-        /// rather than >). Real resume → timer moves → resume fires
-        /// on the next poll. Exit-from-pause → timer stays frozen
-        /// until menu transition → resume never fires → the existing
-        /// songTimer <= initTime branch catches the IN_MENUS transition.
+        /// Snapshot of songTimer at the moment SONG_PAUSED was entered. Distinguishes
+        /// resume (timer moves) from Exit-from-pause (pauseMenuMode flips to 0 while
+        /// the timer stays frozen at the pause point) — without it, Exit produces a
+        /// spurious SONG_PAUSED → SONG_PLAYING flicker before the menu transition lands.
         /// </summary>
         private float pauseTimerSnapshot = float.MinValue;
 
         /// <summary>
-        /// Previous poll's pauseMenuMode value (v0.6.9). Pause-entry is detected on
-        /// the 0 → non-zero TRANSITION of pauseMenuMode, not on the raw current
-        /// value, so stale carry-over reads (e.g. immediately after the user
-        /// clicks Restart from the pause menu — Rocksmith's pauseMenuMode briefly
-        /// keeps reading 2 even though the new song has begun playing) don't
-        /// trigger a false SONG_PLAYING → SONG_PAUSED transition.
-        ///
-        /// Captured at the start of every poll, before newReadout overwrites
-        /// currentMemoryReadout. The pause-entry condition then requires
-        /// `previousPauseMenuMode == 0 && currentMemoryReadout.pauseMenuMode != 0`.
+        /// Previous poll's pauseMenuMode. Pause entry requires the 0 → non-zero
+        /// TRANSITION, not the raw value — after Restart from the pause menu, Rocksmith
+        /// briefly keeps reading 2 while the new song is already playing, which would
+        /// otherwise fire a false SONG_PLAYING → SONG_PAUSED. Captured each poll before
+        /// newReadout overwrites currentMemoryReadout.
         /// </summary>
         private byte previousPauseMenuMode = 0;
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // SONG-RUN CONTEXT (v0.6.5)
-        //
-        // The arrangement context (ID, path, tuning) of the song currently running.
-        // Captured at LogSongStartIfPossible time and preserved through LogSongEnd.
-        //
-        // Why this exists: in Nonstop Play, the songID can flip to the NEXT song
-        // before the CURRENT song's LogSongEnd has fired. The cross-reference logic
-        // then nulls currentMemoryReadout.arrangementID (because the stale value no
-        // longer matches the new song). If LogSongEnd reads from currentMemoryReadout
-        // at that point, arrangementID is gone — and so is the right answer for
-        // arrangement_path / arrangement_tuning if LogSongStartIfPossible never re-fires
-        // for the next song (state machine parked in SONG_ENDING). These three fields
-        // hold the original resolved values so end-of-song logging stays correct.
-        // ─────────────────────────────────────────────────────────────────────────
+        // SONG-RUN CONTEXT: the arrangement context (ID, path, tuning) of the running
+        // song, captured at LogSongStartIfPossible and preserved through LogSongEnd.
+        // In Nonstop Play the songID can flip to the next song before the current
+        // song's end fires, and the cross-reference then nulls
+        // currentMemoryReadout.arrangementID — reading from the readout at end-time
+        // would lose the context.
         private string currentSongRunArrangementID = null;
         private string currentSongRunPath = null;
         private string currentSongRunTuning = null;
-        // True if the current song run was started while in a Nonstop Play gameStage.
-        // Preserved through end-of-song (Nonstop transitions can change gameStage between
-        // start and end) so PlaythroughHistory and the JS playthrough-tracker can
-        // consistently gate writes for the entire run regardless of when end fires.
-        // (v0.6.8) No longer gates playthrough writes — that gate was lifted once
-        // PLAY_arrID made Nonstop arrangement resolution reliable. Field preserved
-        // for any downstream consumer that wants the contextual flag.
+        // True if the song started in a Nonstop Play gameStage (nsp_main /
+        // nonstopplayhub / nonstopplaygame). Set by Sniffer.cs at song start.
+        // Informational only.
         private bool currentSongRunWasNonstopMode = false;
 
-        // (v0.6.8) True if the current song run was started while in a Multiplayer
-        // gameStage (RSMode.MULTIPLAYER — split_game, mp_*, duet_*, h2h_*). Used
-        // by PlaythroughHistory and the JS playthrough-tracker to skip writes —
-        // multi-user note data and per-user arrangements aren't tracked yet, so
-        // MP rows would have data-quality issues. Captured at song start using the
-        // v0.6.8 gameStage-derived mode field (more reliable than gameStage prefix
-        // matching across menu / transition states).
+        // True if the current song run started in a Multiplayer gameStage (split_game,
+        // mp_*, duet_*, h2h_*). PlaythroughHistory and the JS playthrough-tracker use
+        // it to skip writes — multi-user note data isn't tracked.
         private bool currentSongRunWasMultiplayerMode = false;
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // FIRE-ONCE GUARDS (v0.6.5)
-        //
-        // Track which songID we last logged START / END for. The natural state-machine
-        // path and the gameStage / songID-change escape hatches BOTH may try to fire
-        // these events; these fields ensure each event fires at most once per song run.
-        //
-        // Reset to null on songID change (so a re-play of the same song produces a new
-        // run with its own start/end pair).
-        // ─────────────────────────────────────────────────────────────────────────
+        // Fire-once guards: the natural state-machine path and the gameStage /
+        // songID-change escape hatches may BOTH try to fire START / END; these track
+        // the songID last fired for, so each event fires at most once per song run.
+        // Reset on songID change so a replay produces a new start/end pair.
         private string lastLogStartedForSongID = null;
         private string lastLogEndedForSongID = null;
 
@@ -179,18 +129,6 @@ namespace RockSnifferLib.Sniffing
         // Nonstop Play where the timer-based state machine is unreliable).
         private string lastGameStage = null;
 
-        // The deferral fields (startLogDeferralCount, START_LOG_DEFERRAL_MAX) were
-        // REMOVED in v0.6.5 hotfix5 along with the deferral block in
-        // LogSongStartIfPossible and the retry hook in DoMemoryReadout. Their original
-        // purpose was to wait for arrangement_hash memory to populate; with Path
-        // resolution as the new primary mechanism, there's nothing to wait for — Path
-        // is available from Rocksmith launch onward.
-        //
-        // The lastResolvedPath field, SnifferRuntimeState persistence, and
-        // defaultArrangementType setting were also REMOVED in v0.6.5 cleanup.
-        // Pre-Path, those were the working fallback chain when arrangementID failed.
-        // Post-Path, they were unreachable in normal operation — Path resolution
-        // (read from a stable memory byte) handles every case they used to handle.
 
         // Public properties to expose completed and paused status
         public bool Completed => completed;
@@ -338,21 +276,10 @@ namespace RockSnifferLib.Sniffing
 
                 if (newReadout.songID != currentMemoryReadout.songID || (currentCDLCDetails == null || !currentCDLCDetails.IsValid()))
                 {
-                    // ─────────────────────────────────────────────────────────────────
-                    // FORCE-END OLD SONG (v0.6.5; v0.6.9 completion-flag rewrite)
-                    //
-                    // If we previously fired LogSongStart for a song (lastLogStartedForSongID
-                    // matches the OUTGOING currentCDLCDetails) but never fired LogSongEnd for
-                    // it, force-fire end now — BEFORE currentCDLCDetails is updated to the new
-                    // song. This is the primary fix for Nonstop Play, where the timer-based
-                    // state machine can stay parked in SONG_ENDING and never naturally call
-                    // LogSongEnd between songs.
-                    //
-                    // The completed flag is now determined by DetermineCompletedForForceEnd()
-                    // using three deterministic signals (pause-state, SA-fail, no-progress)
-                    // rather than the pre-v0.6.9 maxTime-near-songLength heuristic, which
-                    // was vulnerable to poll-cadence races at song end.
-                    // ─────────────────────────────────────────────────────────────────
+                    // Force-end the outgoing song: if START fired for it but END never did, fire
+                    // END now, BEFORE currentCDLCDetails updates to the new song. Primarily for
+                    // Nonstop Play, where the timer-based state machine can park in SONG_ENDING
+                    // and never naturally end.
                     if (currentCDLCDetails != null && currentCDLCDetails.IsValid() &&
                         lastLogStartedForSongID != null &&
                         lastLogStartedForSongID == currentCDLCDetails.songID &&
@@ -398,26 +325,11 @@ namespace RockSnifferLib.Sniffing
 
                 }
 
-                // ARRANGEMENT ID CROSS-REFERENCE (v0.6.5):
-                //
-                // The arrangement_hash memory pointer in RSMemoryReader can return a STALE valid
-                // hash from the previous song after the songID has already flipped to the new
-                // song — particularly in Nonstop Play, where the game transitions between songs
-                // without fully clearing the arrangement memory region. Format validation in
-                // RSMemoryReader (IsValidArrangementHash) cannot detect this because the stale
-                // value is a real 32-char hex hash; it just belongs to the wrong song. The same
-                // condition occurs whenever the user browses through songs in song-select after
-                // playing one — every browsed songID has the just-played arrangementID in memory.
-                //
-                // At this point in the loop, currentCDLCDetails has been updated to reflect the
-                // current songID, and its arrangements list is the authoritative set of valid
-                // arrangement IDs for this song. If newReadout.arrangementID doesn't appear in
-                // that list, it's stale — silently clear it. (The natural use case of this
-                // clearing is browsing through songs after one was played, which is not a bug
-                // and shouldn't produce log noise. Diagnostic visibility is preserved through
-                // the LogSongStartIfPossible fallback warnings, which fire when the arrangement
-                // can't be resolved AT THE MOMENT we're trying to log a song start — the only
-                // moment when a missing arrangementID is actually a problem.)
+                // Arrangement-ID cross-reference: the memory read can return a STALE but
+                // format-valid hash from the previous song after the songID has flipped
+                // (especially in Nonstop). Format validation can't catch it — the value is a
+                // real 32-char hex hash for the wrong song — so null arrangementID whenever it
+                // matches no arrangement of the current song.
                 if (currentCDLCDetails != null && currentCDLCDetails.IsValid() &&
                     !string.IsNullOrEmpty(newReadout.arrangementID))
                 {
@@ -436,10 +348,8 @@ namespace RockSnifferLib.Sniffing
                     }
                 }
 
-                // (v0.6.9) Capture previous poll's pauseMenuMode BEFORE CopyTo
-                // overwrites currentMemoryReadout. The pause-entry condition below
-                // requires prev==0 && curr!=0 (a real 0→non-zero transition) to
-                // avoid firing on stale carry-over reads after a restart.
+                // Capture previous poll's pauseMenuMode BEFORE CopyTo overwrites
+                // currentMemoryReadout; pause entry requires a real 0 → non-zero transition.
                 previousPauseMenuMode = currentMemoryReadout?.pauseMenuMode ?? 0;
 
                 newReadout.CopyTo(ref currentMemoryReadout);
@@ -457,37 +367,15 @@ namespace RockSnifferLib.Sniffing
                     // Update max observed timer
                     maxTime = Math.Max(maxTime, currentMemoryReadout.songTimer);
 
-                    // lastObservedTimer kept updated for diagnostic logging only (v0.6.7);
-                    // no state-machine logic branches on it post-migration to flag-driven pause.
+                    // lastObservedTimer is diagnostic-only; no state-machine logic branches on it.
                     lastObservedTimer = currentMemoryReadout.songTimer;
                 }
 
-                // ─────────────────────────────────────────────────────────────────────
-                // GAME-STAGE TRANSITION DETECTION (v0.6.5) — primarily for Nonstop Play.
-                //
-                // The timer-based state machine in UpdateState() can be unreliable in
-                // Nonstop, where the C# state can stay parked in SONG_ENDING between
-                // songs (it only naturally exits on songTimer == 0, which doesn't always
-                // happen between consecutive Nonstop songs). gameStage is a more direct
-                // signal of what Rocksmith is actually doing.
-                //
-                // Known gameStage strings (Remastered, post-v0.6.6 static-address reader):
-                //   Learn-A-Song:  las_songs / las_options / las_tuner / las_game /
-                //                  las_pause / las_songreview
-                //   Score Attack:  gcpre / sa_game / sa_pause / sa_songreview
-                //   Nonstop Play:  nsp_main / nonstopplaygame / nonstopplayhub /
-                //                  nsp_pause / nsp_tuner
-                //   Other:         main / panel_bib / shop / gc_games / mp_* / etc.
-                //
-                // Note (v0.6.6): *_pause stages are now visible across all three modes,
-                // but Rocksmith does NOT update gameStage on pause→resume / pause→restart,
-                // so a stale "*_pause" reading does not imply the user is still paused.
-                // Use SnifferState (game_state) for actual play/pause status — it derives
-                // from songTimer behavior, not gameStage strings.
-                //
-                // Only the Nonstop transitions need this escape hatch — Learn-A-Song
-                // and Score Attack work correctly under the existing timer-based logic.
-                // ─────────────────────────────────────────────────────────────────────
+                // Game-stage transition detection — primarily for Nonstop Play, where the
+                // timer-based state machine can park in SONG_ENDING between songs (it only
+                // naturally exits on songTimer == 0). gameStage is the direct signal of what
+                // Rocksmith is doing; the transitions below force-fire START / END where the
+                // natural path is unreliable.
                 string currentGameStage = currentMemoryReadout.gameStage;
                 if (currentGameStage != lastGameStage)
                 {
@@ -517,15 +405,9 @@ namespace RockSnifferLib.Sniffing
                             paused = false;
                         }
                     }
-                    // nonstopplayhub → nonstopplaygame: new song is now being played.
-                    // Force-fire LogSongStartIfPossible if we haven't started this song.
-                    //
-                    // initTime guard (v0.6.5 hotfix3): only fire if the song timer has actually
-                    // started advancing past initTime. songTimer briefly flashes nonzero values
-                    // during loading screens — without this guard, gameStage transitioning to
-                    // "nonstopplaygame" the moment the chart loads (before the user actually
-                    // starts playing) would force-fire LogSongStart prematurely. Mirrors the
-                    // natural state machine's SONG_STARTING → SONG_PLAYING guard.
+                    // nonstopplayhub → nonstopplaygame: new song is now playing; force-fire START.
+                    // initTime guard: songTimer briefly flashes nonzero during loading screens, so
+                    // only fire once the timer has actually advanced past initTime.
                     else if (prevStage == "nonstopplayhub" && newStage == "nonstopplaygame")
                     {
                         if (currentCDLCDetails != null && currentCDLCDetails.IsValid() &&
@@ -542,15 +424,6 @@ namespace RockSnifferLib.Sniffing
                     lastGameStage = newStage;
                 }
 
-                // The deferred-start retry hook (v0.6.5) was REMOVED in hotfix5.
-                // Original purpose: retry LogSongStartIfPossible every poll while in an
-                // in-game gameStage, in case the natural state machine fired it too
-                // early (before arrangement_hash memory had populated) and it returned
-                // deferred. With Path resolution (hotfix5) replacing arrangement_hash as
-                // the primary resolution mechanism, deferral itself is gone — Path is
-                // available from Rocksmith launch onward. The natural state machine and
-                // the nonstopplayhub→nonstopplaygame transition handler each call
-                // LogSongStartIfPossible exactly once per song, and that's sufficient.
 
                 OnMemoryReadout?.Invoke(this, new OnMemoryReadoutArgs() { memoryReadout = currentMemoryReadout });
 
@@ -816,52 +689,24 @@ namespace RockSnifferLib.Sniffing
                 return;
             }
 
-            // STEP 1: Direct arrangementID match (v0.6.5)
-            // Best resolution — exact match. Works in LaS/SA when the arrangement_hash
-            // memory pointer has populated. Fails in Nonstop Play (pointer doesn't
-            // populate there at all).
+            // STEP 1: Direct arrangementID match — exact, best resolution.
             var arrangement = currentCDLCDetails.arrangements?
                 .FirstOrDefault(a => a.arrangementID == currentMemoryReadout.arrangementID);
 
             string fallbackReason = null;
 
-            // STEP 2: Current Path filter (v0.6.5 hotfix5)
-            //
-            // If direct arrangementID match failed, use the user's currently-selected
-            // Path (read from a stable byte pointer at the menu level — see
-            // MemoryOffsets.GetCurrentPathPointer for details). Path is reliable from
-            // Rocksmith launch onward and works in Nonstop Play, where arrangement_hash
-            // fails. It only encodes the path TYPE (Lead/Rhythm/Bass), not the specific
-            // arrangement, so we still need to filter for non-bonus/non-alternate to
-            // disambiguate when multiple arrangements share the same path type.
-            //
-            // Three sub-steps:
-            //   2a) Path-type + non-bonus + non-alternate → if exactly one match, use it.
-            //       This is the common case: most songs have one regular Bass / one
-            //       regular Lead / one regular Rhythm. Bonus/alternate filtering rules
-            //       them out so we land on the user's actual choice.
-            //   2b) Path-type, bonus/alt allowed → if exactly one match, use it.
-            //       Last resort within Path resolution. If the song has only a bonus
-            //       Lead and no regular Lead, and the user has Path=Lead, we pick the
-            //       bonus Lead — there's no other Lead option.
-            //
-            // Caveat: when bonus/alternate arrangements ARE enabled in Nonstop Play,
-            // a song can have a regular Bass AND a bonus Bass. Path=Bass matches both;
-            // we pick the regular one (2a). If the user is actually playing the bonus,
-            // we silently mismatch. This is the bonus-ambiguity problem that keeps the
-            // Nonstop Play playthrough_history / playthrough_tracker gate (hotfix4) in
-            // place even with this hotfix.
+            // STEP 2: Path filter. If the direct match failed, use the user's
+            // currently-selected Path (stable menu-level byte — see
+            // MemoryOffsets.GetCurrentPathPointer; reliable from launch and valid in
+            // Nonstop Play). Path only encodes the type (Lead/Rhythm/Bass), so filter
+            // non-bonus/non-alternate first to disambiguate.
             string currentPath = currentMemoryReadout?.currentPath;
             if (arrangement == null && !string.IsNullOrEmpty(currentPath) &&
                 currentCDLCDetails.arrangements != null)
             {
                 var arrangements = currentCDLCDetails.arrangements;
 
-                // 2a: Prefer non-bonus, non-alternate — first match wins
-                // (v0.6.5 hotfix5.1 — restored legacy first-match behavior; the
-                // count-and-only-pick-if-one logic from initial hotfix5 was leaving
-                // arrangement unresolved when songs had multiple arrangements with type
-                // matching currentPath, falling through to the heuristic chain unnecessarily.)
+                // 2a: Prefer non-bonus, non-alternate — first match wins.
                 foreach (var arr in arrangements)
                 {
                     if ((arr.type == currentPath || arr.name == currentPath) &&
@@ -888,17 +733,8 @@ namespace RockSnifferLib.Sniffing
                 }
             }
 
-            // STEP 3 onwards: Defensive fallback chain (v0.6.5).
-            //
-            // Reached when both direct arrangementID match AND Path resolution failed.
-            // In normal operation this should not happen — Path is read from a stable
-            // memory byte that's populated from Rocksmith launch onward. These steps
-            // are defense-in-depth for the rare edge case where the Path read failed
-            // (e.g. transient memory hiccup during process tear-down).
-            //
-            // The pre-Path fallback chain (prev-path heuristic backed by
-            // SnifferRuntimeState persistence, defaultArrangementType setting) was
-            // removed in v0.6.5 cleanup. Path resolution made all of it unreachable.
+            // STEP 3+: defensive fallback chain, reached only when both the direct match
+            // and Path resolution failed (e.g. transient memory hiccup).
             if (arrangement == null)
             {
                 var arrangements = currentCDLCDetails.arrangements;
@@ -933,38 +769,19 @@ namespace RockSnifferLib.Sniffing
                 }
             }
 
-            // DEFERRAL was removed in hotfix5. With Path now available from Rocksmith
-            // launch onward (it's a menu-level setting, not waiting for a song to start),
-            // there's nothing useful to wait for — Path is either there or we have an
-            // edge-case failure that 5 seconds of waiting won't fix. Fall through to
-            // unknown logging immediately.
 
-            // Capture Nonstop-mode flag at song START (gameStage may transition by end).
-            // Pre-v0.6.8 this flag gated playthrough writes; v0.6.8 lifted the gate
-            // once PLAY_arrID made Nonstop arrangement resolution reliable. The flag
-            // is still propagated on event args for any downstream consumer that wants
-            // the contextual signal, and it's used below to suppress the
-            // "Could not resolve arrangement" warning for Nonstop runs — see comment
-            // at the warning site.
-            //
-            // The check uses gameStage strings directly (rather than the v0.6.8
-            // mode field) to keep behavior identical to the v0.6.5 hotfix4 definition.
+            // Capture the Nonstop flag at song START (gameStage may transition by end).
+            // Informational on event args; also suppresses the "Could not resolve
+            // arrangement" warning for Nonstop runs — see the warning site.
             string startGameStage = currentMemoryReadout?.gameStage;
             currentSongRunWasNonstopMode =
                 startGameStage == "nsp_main" ||
                 startGameStage == "nonstopplayhub" ||
                 startGameStage == "nonstopplaygame";
 
-            // (v0.6.8) Capture MULTIPLAYER-mode flag at song START. Used by
-            // PlaythroughHistory and the JS playthrough-tracker to gate writes — full
-            // MP support (multi-user note data, per-user arrangements) is a separate
-            // larger effort; until that lands, MP plays would produce row-quality
-            // issues if persisted.
-            //
-            // Uses the v0.6.8 gameStage-derived mode field rather than reimplementing
-            // gameStage prefix matching for split_game / mp_* / duet_* / h2h_* — the
-            // RSMode classifier already covers all of those (see
-            // RSMemoryReader.DeriveModeFromGameStage).
+            // Capture the Multiplayer flag at song START — PlaythroughHistory and the JS
+            // tracker use it to skip writes. Uses the gameStage-derived mode field (the
+            // RSMode classifier already covers split_game / mp_* / duet_* / h2h_*).
             currentSongRunWasMultiplayerMode = currentMemoryReadout?.mode == RSMode.MULTIPLAYER;
 
             string path;
@@ -977,18 +794,9 @@ namespace RockSnifferLib.Sniffing
 
                 if (fallbackReason != null && !currentSongRunWasNonstopMode)
                 {
-                    // Suppress the warning when the song was started in Nonstop Play.
-                    // v0.6.8's PLAY_arrID chain makes arrangement-ID resolution reliable
-                    // in Nonstop, but brief transients during song-to-song transitions
-                    // can still produce momentary failures where Path-based fallback
-                    // fires; logging those as errors would be noise on every Nonstop
-                    // song. The suppression conservatively preserves pre-v0.6.8 quietness
-                    // for Nonstop, even though the underlying resolution gap is now
-                    // closed in the common case.
-                    //
-                    // For LaS / SA / other modes, the warning is still useful — it
-                    // means either a transient timing race (ID hadn't populated yet at
-                    // the read tick) or a genuine ID-mismatch bug worth investigating.
+                    // Suppress the warning for Nonstop runs: brief transients during song-to-song
+                    // transitions can momentarily fail resolution and fall back to Path; logging
+                    // those as errors would be noise on every Nonstop song.
                     Logger.LogError(
                         "Could not resolve arrangement at song start (memory arrangementID was '{0}'). Used fallback ({1}) and chose path='{2}', tuning='{3}'. Song will be logged to history with these values.",
                         currentMemoryReadout.arrangementID ?? "<null>",
@@ -1216,20 +1024,9 @@ namespace RockSnifferLib.Sniffing
             switch (currentState)
             {
                 case SnifferState.IN_MENUS:
-                    // Guard transition with gameStage check (v0.6.7) to prevent
-                    // spurious progression into SONG_SELECTED → SONG_STARTING when
-                    // RockSniffer attaches to an already-running Rocksmith process,
-                    // when Rocksmith restarts while RockSniffer is running, or when
-                    // any transient memory garbage briefly reads a non-zero songTimer
-                    // in a menu state. Without this guard, the state machine
-                    // historically marched forward through menu states based on
-                    // junk timer reads and could get stuck in SONG_STARTING.
-                    //
-                    // Only treat songTimer != 0 as a real song-start signal when
-                    // gameStage is one of the values consistent with being in (or
-                    // about to be in) a song. Sticky *_pause stages are included
-                    // because gameStage doesn't update on resume — see
-                    // IsPotentiallyPlayingGameStage for full classification.
+                    // Gate with gameStage: prevents spurious IN_MENUS → SONG_SELECTED progression
+                    // when attaching to a running process, on Rocksmith restart, or when transient
+                    // memory garbage briefly reads a non-zero songTimer in a menu state.
                     if (currentMemoryReadout.songTimer != 0 &&
                         IsPotentiallyPlayingGameStage(currentMemoryReadout.gameStage))
                     {
@@ -1260,27 +1057,10 @@ namespace RockSnifferLib.Sniffing
                         currentState = SnifferState.SONG_PLAYING;
                         LogSongStartIfPossible();
                     }
-                    // Escape hatch (v0.6.7): user backed out of song-start before
-                    // the timer ever advanced past initTime. Without this branch,
-                    // SONG_STARTING was sticky — its only exit was the
-                    // songTimer > initTime path above, so if the user pressed
-                    // Esc during the loading screen or otherwise aborted before
-                    // gameplay began, the state machine would park in
-                    // SONG_STARTING indefinitely.
-                    //
-                    // gameStage observation is the cleanest detector here: when
-                    // the user aborts, Rocksmith transitions gameStage back to
-                    // a menu/tuner/songreview value. We deliberately do NOT
-                    // exit on *_pause gameStages (las_pause, sa_pause, nsp_pause)
-                    // because those are sticky and may be lingering from a prior
-                    // song's pause that hasn't yet been cleared by a major
-                    // Rocksmith stage transition. See IsDefinitelyMenuGameStage
-                    // for the full allowlist.
-                    //
-                    // No song-end event fires here — no song actually started, so
-                    // there is nothing to log. The state machine simply unwinds
-                    // back to IN_MENUS and the normal startup-detection logic
-                    // resumes from there.
+                    // Escape hatch: the user backed out of song-start before the timer advanced
+                    // past initTime (e.g. Esc during loading). SONG_STARTING's only other exit is
+                    // songTimer > initTime, so without this it parks indefinitely; gameStage
+                    // returning to a menu value is the detector.
                     else if (IsDefinitelyMenuGameStage(currentMemoryReadout.gameStage))
                     {
                         Logger.Log("SONG_STARTING aborted (gameStage={0}, timer never advanced); returning to IN_MENUS", currentMemoryReadout.gameStage);
@@ -1296,12 +1076,9 @@ namespace RockSnifferLib.Sniffing
                         currentState = SnifferState.SONG_ENDING;
                     }
 
-                    // If the timer goes to 0 without reaching the end, force-end
-                    // the song. The completed flag is determined by
-                    // DetermineCompletedForForceEnd() — this catches SA 3-strike
-                    // fail, no-input boot at start, and natural-completion-missed-
-                    // SONG_ENDING-race (the last of which was a v0.6.8 false
-                    // negative source — see v0.6.9 release notes).
+                    // Timer hit 0 before the end: force-end. DetermineCompletedForForceEnd()
+                    // decides the completed flag — catches SA 3-strike fail, no-input boot, and a
+                    // natural completion whose SONG_ENDING window the poll missed.
                     if (currentMemoryReadout.songTimer == 0 &&
                         initTime != float.MaxValue)
                     {
@@ -1320,27 +1097,11 @@ namespace RockSnifferLib.Sniffing
                         break;
                     }
 
-                    // PAUSE ENTRY (v0.6.7 flag-driven, v0.6.9 transition-gated):
-                    // pauseMenuMode at MemoryOffsets.GetPauseMenuModePointer encodes
-                    // blocking-overlay state: 0=no overlay, 1=sub-overlay (e.g.
-                    // tuner-from-pause), 2=top-level overlay (pause menu, restart
-                    // confirmation, etc.).
-                    //
-                    // v0.6.9: detection now requires the 0 → non-zero TRANSITION of
-                    // pauseMenuMode rather than just the current non-zero state. This
-                    // prevents a false SONG_PLAYING → SONG_PAUSED firing immediately
-                    // after the user clicks Restart from the pause menu: Rocksmith
-                    // can briefly keep pauseMenuMode reading 2 for several polls into
-                    // the new song's playback before clearing it to 0. Without the
-                    // transition gate, the new song's first few polls (once
-                    // songTimer > initTime) would fire a spurious "Song Paused!"
-                    // followed by "Song Resumed!" once the stale flag cleared.
-                    //
-                    // The initTime guard is preserved: pauseMenuMode can theoretically
-                    // become non-zero during the brief loading-screen window before
-                    // the user has actually started playing (e.g. a Tools-menu access
-                    // during a transition). Once initTime is captured (timer first
-                    // observed > 0), pause detection is enabled.
+                    // Pause entry: pauseMenuMode encodes blocking-overlay state (0=none,
+                    // 1=sub-overlay e.g. tuner-from-pause, 2=top-level pause menu / Mixer /
+                    // restart confirmation). Detection requires the 0 → non-zero TRANSITION —
+                    // after Restart from the pause menu the value briefly stays 2 while the new
+                    // song plays, and raw-value detection would fire a false pause.
                     if (previousPauseMenuMode == 0 &&
                         currentMemoryReadout.pauseMenuMode != 0 &&
                         initTime != float.MaxValue &&
@@ -1375,33 +1136,12 @@ namespace RockSnifferLib.Sniffing
                         pauseTimerSnapshot = float.MinValue;
                         paused = false;
                     }
-                    // PAUSE EXIT (v0.6.7): flag-driven via pauseMenuMode + timer-movement guard.
-                    //
-                    // Migrated from the v0.6.6 timer-stall heuristic which required
-                    // STALL_THRESHOLD polls of timer advancement before recognizing
-                    // resume. The flag-driven approach recognizes resume on the
-                    // first poll where pauseMenuMode returns to 0 AND the songTimer
-                    // has moved from where it was at pause-entry.
-                    //
-                    // The songTimer != pauseTimerSnapshot guard is critical: when
-                    // the user hits Exit from the pause menu, pauseMenuMode flips
-                    // to 0 (engine clears the overlay) while songTimer is still
-                    // frozen at the pause-point. Without the timer-movement check,
-                    // the !isPaused condition alone would fire a spurious
-                    // SONG_PAUSED → SONG_PLAYING transition for 1-2 polls until
-                    // songTimer drops to 0 and the exit-detection branch above
-                    // catches it. The snapshot ensures real resume (timer
-                    // re-advances, possibly with a small rewind for "catch up")
-                    // is distinguished from exit (timer stays frozen until the
-                    // engine fully transitions back to menus).
-                    //
-                    // Tuner-from-pause is handled correctly without special-
-                    // casing: the engine transitions pauseMenuMode from 2 (pause
-                    // menu visible) to 1 (tuner sub-overlay) when the user enters
-                    // the tuner — still non-zero, so isPaused stays true and this
-                    // branch never evaluates. Only when the user fully returns to
-                    // gameplay (mode 0) AND the timer demonstrates movement does
-                    // SONG_PAUSED exit to SONG_PLAYING.
+                    // Pause exit: flag-driven — resume is recognized on the first poll where
+                    // pauseMenuMode returns to 0 AND songTimer has moved from the pause-entry
+                    // snapshot. The timer guard matters: on Exit-from-pause the flag clears while
+                    // the timer stays frozen, and without the guard that reads as a spurious
+                    // resume before the menu transition lands. (Rocksmith also rewinds the timer
+                    // slightly on resume, which the != comparison tolerates.)
                     else if (!currentMemoryReadout.isPaused &&
                              currentMemoryReadout.songTimer > initTime &&
                              currentMemoryReadout.songTimer != pauseTimerSnapshot)
@@ -1463,42 +1203,25 @@ namespace RockSnifferLib.Sniffing
             }
         }
 
-        // ─────────────────────────────────────────────────────────────────────
-        // gameStage classification helpers (v0.6.7)
+        // gameStage classification helpers
         //
-        // The state machine's startup transitions (IN_MENUS → SONG_SELECTED, and
-        // the SONG_STARTING → IN_MENUS escape hatch) need to distinguish three
-        // categories of gameStage values:
+        // The startup transitions (IN_MENUS → SONG_SELECTED, and the SONG_STARTING →
+        // IN_MENUS escape hatch) distinguish three categories of gameStage:
         //
-        //   1. "Potentially playing"  → las_game, sa_game, nonstopplaygame,
-        //                                las_pause, sa_pause, nsp_pause
-        //      These either mean the user IS in a song, or MIGHT be in a song
-        //      with a sticky *_pause gameStage that hasn't cleared yet (because
-        //      Rocksmith only clears *_pause on major stage transitions like
-        //      song-end or menu navigation, NOT on resume from pause).
+        //   1. "Potentially playing" — las_game, sa_game, nonstopplaygame, las_pause,
+        //      sa_pause, nsp_pause. The user IS in a song, or MIGHT be — *_pause is
+        //      sticky (Rocksmith only clears it on major stage transitions, not on
+        //      resume from pause).
+        //   2. "Definitely menu" — mainmenu, gcpre, learnasong, scoreattack,
+        //      nonstopplay, nsp_main, *_songs, *_options, *_tuner, *_songreview,
+        //      panel_*, shop, gc_*, gcade, ge_*, mp_*, sm_*. Clearly not actively
+        //      playing (includes tuners and post-song review).
+        //   3. Unknown — treat as menu for entry guards (don't progress to
+        //      SONG_SELECTED) but NOT for the SONG_STARTING escape (don't drop out on
+        //      a possible uncatalogued song-start state).
         //
-        //   2. "Definitely menu"      → mainmenu, gcpre, learnasong, scoreattack,
-        //                                nonstopplay, nsp_main, *_songs,
-        //                                *_options, *_tuner, *_songreview,
-        //                                panel_*, shop, gc_*, gcade, ge_*,
-        //                                mp_*, sm_*
-        //      The user is clearly NOT actively playing a song. Includes
-        //      *_tuner (whether reached from a pause menu or directly from a
-        //      song-select menu — either way, not actively playing) and
-        //      *_songreview (the post-song summary).
-        //
-        //   3. Unknown / unclassified → anything not on either list above
-        //      Default to safest behavior: treat as menu for entry guards
-        //      (don't progress to SONG_SELECTED), but don't treat as menu for
-        //      the SONG_STARTING escape (don't drop out on an unknown value
-        //      that might be a real song-start state we haven't catalogued).
-        //
-        // Stages are compared as exact strings rather than prefix matches to
-        // keep classification deterministic. New Rocksmith gameStages we
-        // encounter later can be added here as we identify them — the safe
-        // default for unknowns is to NOT make state machine decisions based
-        // on the gameStage value.
-        // ─────────────────────────────────────────────────────────────────────
+        // Exact-string comparison keeps classification deterministic; the safe default
+        // for unknown stages is to make no state-machine decision from them.
 
         /// <summary>
         /// True if gameStage indicates the user is potentially in a song —

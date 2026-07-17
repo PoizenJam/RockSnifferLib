@@ -82,50 +82,25 @@ public static class MemoryOffsets
     /// Get the address of the current gameStage string for the given edition.
     /// </summary>
     /// <remarks>
-    /// Migrated to a static-address read in v0.6.6 (PoizenJam). The previous
-    /// pointer chain (entry 0x00F5C5AC + edition shift, offsets [0x18, 0x18, 0xC, 0x14])
-    /// walked into a transient per-screen UI struct that was unreliable in
-    /// several common states:
-    ///   - SA song-select / song-options / tuner: returned junk strings
-    ///     (file path fragments, etc.) because the chain landed in unrelated
-    ///     reused buffers.
-    ///   - LaS pause and Nonstop pause: never observed at all, because the
-    ///     chain didn't track those stages — `las_pause` and `nsp_pause` are
-    ///     real Rocksmith gameStages that the chain was silently dropping.
-    ///   - Various transient menu transitions: stale or absent values.
+    /// Static .data-section buffer at Rocksmith2014.exe+0xF5F7C9 (Remastered) — the
+    /// canonical cell Rocksmith's UI writes for the current stage. Tracks correctly
+    /// across all observed states, including all three modes' pause stages and the
+    /// SA song-select / song-options / tuner screens. Found via Cheat Engine
+    /// string-scan ("gcpre"), keeping the hit that round-trips across mode/menu
+    /// transitions; stored as a literal string buffer ("main\0...", "las_songs\0...").
     ///
-    /// The static address `Rocksmith2014.exe+0xF5F7C9` (Remastered) is the
-    /// canonical .data-section buffer Rocksmith's UI code writes for the
-    /// current displayed/tracked stage. It tracks correctly across all
-    /// observed states including all three modes' pause stages and the SA
-    /// song-select / song-options / tuner screens that the chain garbled.
+    /// Returned as (entryAddress, []) so the FollowPointers codepath handles it
+    /// uniformly — empty offsets means a direct read at base+entry.
     ///
-    /// Discovered (PoizenJam, v0.6.6) using Cheat Engine string-scan for "gcpre"
-    /// with the game running, then narrowing the 13 hits by observing which
-    /// one round-tripped correctly across mode/menu transitions. The hit at
-    /// module+0xF5F7C9 was the canonical writer; bytes at that address are
-    /// stored as a literal string buffer (verified via memory viewer:
-    /// "main\0..." in main menu, "las_songs\0..." in LaS song-select, etc.).
+    /// KNOWN ENGINE BEHAVIOR (not a reader bug, do not "correct" here): Rocksmith
+    /// does not update this cell on pause→resume or pause→restart for ANY mode; it
+    /// keeps reading "*_pause" until the user navigates to a menu or starts another
+    /// song. Consumers needing play/pause state should use game_state (SnifferState).
     ///
-    /// Returned as a (entryAddress, []) tuple so the existing FollowPointers
-    /// codepath in RSMemoryReader handles it uniformly — empty offsets means
-    /// the foreach loop is a no-op and the read happens at base+entry directly.
-    ///
-    /// KNOWN ENGINE BEHAVIOR (not a reader bug, do not "correct" here):
-    /// Rocksmith does not update this cell on pause→resume or pause→restart
-    /// transitions for ANY mode. The cell continues reading "*_pause" until
-    /// the user navigates to a menu or starts a different song. Consumers
-    /// needing actual play/pause state should consult `game_state` (the
-    /// SnifferState machine), which handles this correctly via the
-    /// timer-stall heuristic in Sniffer.UpdateState().
-    ///
-    /// EDITION SHIFTS (Beta / LaP): back-derived using the +0x3080 (Beta→Remastered)
-    /// and +0x4080 (Beta→LaP) shifts that every other pointer in this file uses.
-    /// That convention has held for all eight previously-mapped pointers/addresses,
-    /// so it is very likely correct here too — but the Beta and Learn_And_Play
-    /// values have not been independently verified. If those editions ever read
-    /// garbage / empty for gameStage with otherwise-working RockSniffer behavior,
-    /// check this address as the first suspect.
+    /// EDITION SHIFTS (Beta / LaP): back-derived via the +0x3080 / +0x4080 shifts
+    /// used by every other pointer in this file; not independently verified. If
+    /// those editions read garbage/empty gameStage with otherwise-working behavior,
+    /// suspect this address first.
     /// </remarks>
     /// <param name="edition"></param>
     /// <returns>A tuple of (entry address, pointer offsets) — offsets is empty
@@ -180,38 +155,23 @@ public static class MemoryOffsets
     /// Get the pointer to the current Path (arrangement type) byte for the given edition.
     /// </summary>
     /// <remarks>
-    /// Reverse-engineered (PoizenJam, v0.6.5 hotfix5). This is a 1-byte enum at a stable
-    /// menu-level address — populated essentially from Rocksmith launch (defaults to 1
-    /// for Lead) and only mutated when the user actively switches Path in options or
-    /// song-select. Persistent through every gameStage and game state. Invariant to
-    /// bonus and alternate arrangements (only encodes the path *type*, not the specific
-    /// arrangement).
+    /// 1-byte enum at a stable menu-level address — populated from launch (defaults
+    /// 1 = Lead), mutated only when the user switches Path in options or
+    /// song-select, persistent through every gameStage. Encodes only the path type,
+    /// so it is invariant to bonus/alternate arrangements. Works in Nonstop Play,
+    /// where the arrangement_hash pointer does not populate.
     ///
-    /// Value mapping:
-    ///   0x01 → Lead
-    ///   0x02 → Rhythm
-    ///   0x04 → Bass
-    ///   anything else → Unknown
-    ///
-    /// Crucially, this works in Nonstop Play (where the existing arrangement_hash
-    /// pointer fails to populate). It does NOT solve the bonus/alternate ambiguity in
-    /// Nonstop — for that, the playthrough_history / playthrough_tracker Nonstop gate
-    /// added in hotfix4 stays in place.
+    /// Value mapping: 0x01 → Lead, 0x02 → Rhythm, 0x04 → Bass, else Unknown.
     /// </remarks>
     public static (int entryAddress, int[] offsets) GetCurrentPathPointer(RSEdition edition)
     {
-        // Discovered (PoizenJam, v0.6.5 hotfix5) using Cheat Engine on Rocksmith Remastered:
-        //   CE table entry: Rocksmith2014.exe+00F5F570, offsets [0x1FC, 0x10] (CE display
-        //   order — outermost first), read as Byte. Walk order (which FollowPointers
-        //   expects) is the reverse: [0x10, 0x1FC].
+        // CE table entry: Rocksmith2014.exe+00F5F570, offsets [0x1FC, 0x10] (CE display
+        // order — outermost first), read as Byte. Walk order (FollowPointers) is the
+        // reverse: [0x10, 0x1FC].
         //
-        // The Beta-build base address below is back-derived from the verified Remastered
-        // address using the consistent +0x3080 (Beta→Remastered) and +0x4080 (Beta→LaP)
-        // shifts that every other pointer in this file uses. That convention has held for
-        // all seven previously-mapped pointers, so it is very likely correct here too —
-        // but the Beta and Learn_And_Play values have not been independently verified.
-        // If those editions ever read 0x00 for Path (with otherwise-working RockSniffer
-        // behavior), check this address as the first suspect.
+        // Beta / LaP bases are back-derived via the standard +0x3080 / +0x4080 shifts;
+        // not independently verified — if those editions read 0x00 for Path with
+        // otherwise-working behavior, suspect this address first.
         return edition switch
         {
             RSEdition.Remastered_Just_In_Case_We_Need_It_Beta => (0x00F5C4F0, [0x10, 0x1FC]),
@@ -225,73 +185,32 @@ public static class MemoryOffsets
     /// Get the address of the pause-menu mode byte for the given edition.
     /// </summary>
     /// <remarks>
-    /// Discovered (PoizenJam, v0.6.7) using Cheat Engine on Rocksmith Remastered.
-    /// A 1-byte cell at module+0xF5F5FC encoding which blocking pause-style overlay
-    /// is currently active, with the following observed value table:
+    /// 1-byte static .data cell at module+0xF5F5FC (Remastered) encoding
+    /// blocking-overlay depth:
     ///
-    ///     0 — No blocking overlay. Active gameplay, main menus, song select,
-    ///         loading screens, song review screens.
-    ///     1 — Sub-overlay active. Tuner accessed FROM the pause menu, or
-    ///         tuner accessed from the main menu's Tools sub-menu, or other
-    ///         sub-prompts reached from a top-level overlay.
-    ///     2 — Top-level blocking overlay active. In-song pause menu (Resume/
-    ///         Restart/Tuner/Mixer/Exit), Mixer overlay, Restart-confirmation
-    ///         prompts, main menu's Tools overlay (the equivalent of an
-    ///         in-song pause menu accessed from main menu via SPACE).
+    ///     0 — no blocking overlay (gameplay, menus, song select, loading, review)
+    ///     1 — sub-overlay (tuner reached from the pause menu or the main menu's
+    ///         Tools sub-menu, other sub-prompts)
+    ///     2 — top-level overlay (in-song pause menu, Mixer, restart confirmation,
+    ///         main menu's Tools overlay)
     ///
-    /// Critically the variable does NOT represent "is the user paused during
-    /// gameplay." It represents "is one of the blocking pause-style overlays
-    /// active" — which happens to overlap perfectly with mid-song pause when
-    /// the user is in a song, but ALSO fires for the Tools menu accessed from
-    /// outside any song. Consumers wanting "is paused during a song" should
-    /// combine this with a SnifferState (game_state) check.
+    /// This is NOT "is the user paused during gameplay" — value 2 also fires for
+    /// the main menu's Tools overlay; "paused during a song" requires combining
+    /// with a SnifferState check. Because 1 and 2 both mean "in a pause sub-flow,"
+    /// the correct paused test is mode != 0, not mode == 2.
     ///
-    /// Cross-mode validated: tracks correctly in Score Attack, Learn-A-Song,
-    /// Nonstop Play, and Guitarcade minigames with no warmup gate (unlike the
-    /// earlier GCPauseManager-flag candidate, which required prior Score Attack
-    /// gameplay before becoming active).
+    /// Cross-mode validated (SA, LaS, NSP, Guitarcade), no warmup gate, and
+    /// survives relaunch as a true static (verified by memory-neighborhood
+    /// inspection and a no-rescan relaunch test).
     ///
-    /// Survives game relaunch as a true .data-section static. Confirmed by:
-    ///   - Memory neighborhood inspection: surrounding bytes show structured
-    ///     .data patterns (ASCII string fragments, aligned small integers,
-    ///     installation-ID GUIDs at +0xC0..+0xE0 offsets) consistent with
-    ///     compiled-binary static storage rather than heap allocation.
-    ///   - Relaunch test: closing Rocksmith, reopening, re-attaching CE
-    ///     without scanning, navigating directly to the typed offset — value
-    ///     still tracks pause-menu state correctly across all modes.
-    ///   - Address neighborhood: sandwiched between two Koko-named .data
-    ///     candidates (MustBlockInputsDueToPauseMenu at +F5F545,
-    ///     EnablePauseMenu at +F5F5DB) and the previously-validated gameStage
-    ///     buffer at +F5F7C9.
+    /// EDITION SHIFTS (Beta / LaP): back-derived via the standard +0x3080 /
+    /// +0x4080 shifts; not independently verified — if those editions read
+    /// constant zero across pause states, suspect this address first.
     ///
-    /// IMPORTANT design note for state-machine consumers: because value=1
-    /// (tuner-from-pause) is distinct from value=2 (pause menu) but BOTH
-    /// represent "user is in a pause sub-flow," the correct test for
-    /// "currently paused" is mode != 0, not mode == 2. This eliminates the
-    /// tuner-from-pause edge case that complicated earlier pause-detection
-    /// designs — no asymmetric flag-entry / timer-exit gymnastics needed,
-    /// since the variable itself never lies about "we are in a pause overlay"
-    /// during tuner-from-pause.
-    ///
-    /// Returned as (entryAddress, []) tuple so the existing FollowPointers
-    /// codepath in RSMemoryReader handles it uniformly — empty offsets means
-    /// the foreach loop is a no-op and the read happens at base+entry
-    /// directly, matching the same pattern used for the gameStage static read.
-    ///
-    /// EDITION SHIFTS (Beta / LaP): back-derived using the +0x3080 (Beta→
-    /// Remastered) and +0x4080 (Beta→LaP) shifts that every other pointer
-    /// in this file uses. Convention has held for all eleven previously-mapped
-    /// pointers/addresses, so very likely correct — but Beta and Learn_And_Play
-    /// values have NOT been independently verified. If those editions read
-    /// constant zero across all pause states (otherwise-working RockSniffer
-    /// behavior), check this address as the first suspect.
-    ///
-    /// Discovery credit: kokolihapihvi (upstream RockSniffer maintainer)
-    /// pointed us at the surrounding memory region by sharing two named
-    /// candidate addresses from his RE project (MustBlockInputsDueToPauseMenu,
-    /// EnablePauseMenu). Both turned out to be dead in the current Remastered
-    /// build (consistently 0 across all states), but the neighborhood inspection
-    /// they prompted led directly to this find.
+    /// Discovery credit: kokolihapihvi shared two named candidates from his RE
+    /// project (MustBlockInputsDueToPauseMenu, EnablePauseMenu); both were dead in
+    /// the current Remastered build, but the neighborhood they pointed at led
+    /// directly to this find.
     /// </remarks>
     /// <param name="edition"></param>
     /// <returns>A tuple of (entry address, pointer offsets) — offsets is empty
@@ -312,80 +231,32 @@ public static class MemoryOffsets
     /// Get the pointer to the currently-loaded arrangement GUID (PLAY_arrID) for the given edition.
     /// </summary>
     /// <remarks>
-    /// Reverse-engineered (PoizenJam, v0.6.8) via Cheat Engine on Rocksmith Remastered.
-    /// A 16-byte cell holding the currently-loaded arrangement's GUID in Microsoft
-    /// little-endian layout (first 3 fields byte-swapped, last 8 bytes sequential).
-    /// Read through a 5-deep pointer chain rooted at the same "stable singleton manager
-    /// pointers" entry address as the existing arrangement_hash chain — the two chains
-    /// differ only in their offset sequences, not their entry point (both Beta-base
-    /// 0x00F5C5AC, both Remastered base 0xF5F62C = 0xF5C5AC + 0x3080).
-    ///
-    /// The 16 raw bytes convert to the standard 32-char uppercase hex form via
-    ///     new Guid(bytes).ToString("N").ToUpperInvariant()
-    /// matching the format of songDetails.arrangements[].arrangementID for direct
-    /// case-sensitive comparison.
+    /// 16-byte cell holding the loaded arrangement's GUID in Microsoft LE layout,
+    /// read through a 5-deep chain rooted at the same entry address as the
+    /// arrangement_hash chain (Remastered base 0xF5F62C). Converted via
+    /// new Guid(bytes).ToString("N").ToUpperInvariant() to the 32-char uppercase
+    /// hex form matching songDetails.arrangements[].arrangementID (case-sensitive
+    /// comparison downstream).
     ///
     /// STATE COVERAGE:
-    ///   las_game / las_pause          ✓ holds the currently-playing arrangement GUID
-    ///   nonstopplaygame / nsp_pause   ✓ same — this is the v0.6.8 fix target.
-    ///                                   Nonstop Play was the long-standing gap where
-    ///                                   arrangement_hash never populated; PLAY_arrID
-    ///                                   finally provides per-arrangement resolution
-    ///                                   in Nonstop, distinguishing bonus/alternate
-    ///                                   arrangements where Path-byte fallback could
-    ///                                   not (see Sniffer.cs arrangement resolution
-    ///                                   STEP 1 + STEP 2 for context).
-    ///   Nonstop carousel / nsp_tuner  ✗ not populated — the chain may resolve but
-    ///                                   the cell isn't valid until song-load proper.
-    ///   sa_game / sa_pause            ✗ Score Attack has its own subsystem. The
-    ///                                   existing arrangement_hash chain handles SA
-    ///                                   correctly and must remain in use for those
-    ///                                   gameStages — see RSMemoryReader dispatch.
-    ///   Menus, transitions, songreview ✗ not reliable.
+    ///   las_game / las_pause          ✓ currently-playing arrangement GUID
+    ///   nonstopplaygame / nsp_pause   ✓ the only chain that resolves arrangements
+    ///                                   in Nonstop (arrangement_hash never
+    ///                                   populates there), incl. bonus/alternate
+    ///   Nonstop carousel / nsp_tuner  ✗ cell not valid until song-load proper
+    ///   sa_game / sa_pause            ✗ Score Attack has its own subsystem — keep
+    ///                                   using arrangement_hash there
+    ///   Menus / transitions / review  ✗ not reliable
     ///
-    /// The chain populates the moment a song starts loading (i.e. when the user
-    /// advances past the tuner, or when the song is selected if no tuning needed)
-    /// and remains valid throughout song play. Across both LaS and Nonstop modes
-    /// the same chain handles gameplay and pause, including the pause-after-resume
-    /// sticky-state behavior documented for gameStage (see GetCurrentMenuPointer
-    /// remarks for that quirk — it does not affect PLAY_arrID, which is per-song).
+    /// Populates when a song starts loading and stays valid through play and pause.
+    /// In LaS its output is byte-for-byte identical to arrangement_hash
+    /// (cross-validated by reading both chains simultaneously), so a single chain
+    /// spans LaS and Nonstop. Survives process restart and Nonstop entry/exit
+    /// cycles; tracks across songs and across arrangements within a song.
     ///
-    /// EQUIVALENCE WITH arrangement_hash (LaS only):
-    /// In LaS gameplay the GUID-converted output of this chain matches the ASCII hex
-    /// string output of the arrangement_hash chain byte-for-byte (cross-validated
-    /// during discovery by reading both chains simultaneously). They are interchangeable
-    /// for LaS resolution. v0.6.8 consolidates on PLAY_arrID for LaS because (a) a
-    /// single chain spans both LaS and Nonstop, simplifying dispatch; (b) a 16-byte
-    /// binary read is cheaper than a 32-char ASCII string read with null-termination
-    /// scan; and (c) it removes the LaS code path's dependency on arrangement_hash,
-    /// which has historically been the more fragile of the two chains.
-    ///
-    /// CHAIN VALIDATION (PoizenJam, v0.6.8):
-    ///   - Survived full Rocksmith process restart with correct resolution to new
-    ///     heap address (singleton manager re-bind, same pattern observed for the
-    ///     existing arrangement_hash, song-timer, and note-data chains).
-    ///   - Survived multiple Nonstop entry/exit cycles, including round-trips
-    ///     through main menu and back into Nonstop.
-    ///   - Tracked correctly across multiple distinct songs and across distinct
-    ///     arrangements within the same song (Lead vs Rhythm vs Bass, plus
-    ///     bonus / alternate where present).
-    ///   - Output matches arrangement_hash in LaS gameplay (cross-validation
-    ///     against the previously-trusted chain).
-    ///
-    /// FORMAT NOTE: the GUID is returned as a string of 32 uppercase hex chars with
-    /// no separators, matching the example IDs observed in PSARC-side data (e.g.
-    /// EA94EC3F9817673B925B4997C4C0175C). Sniffer.cs cross-references readout.
-    /// arrangementID against songDetails.arrangements[].arrangementID using
-    /// case-sensitive string equality, so case normalization to upper is required
-    /// for downstream matching to succeed.
-    ///
-    /// EDITION SHIFTS (Beta / LaP): back-derived using the +0x3080 (Beta→Remastered)
-    /// and +0x4080 (Beta→LaP) shifts that every other pointer in this file uses.
-    /// Convention has held for all twelve previously-mapped pointers/addresses, so
-    /// very likely correct here too — but the Beta and Learn_And_Play values have
-    /// NOT been independently verified. If those editions ever read all-zero GUIDs
-    /// across all gameplay states (with otherwise-working RockSniffer behavior),
-    /// check this address as the first suspect.
+    /// EDITION SHIFTS (Beta / LaP): back-derived via the standard +0x3080 /
+    /// +0x4080 shifts; not independently verified — all-zero GUIDs across gameplay
+    /// states would point here first.
     /// </remarks>
     /// <param name="edition"></param>
     /// <returns>A tuple of (entry address, pointer offsets).</returns>
@@ -393,10 +264,9 @@ public static class MemoryOffsets
     public static (int entryAddress, int[] offsets) GetPlayArrIDPointer(RSEdition edition)
     {
         // CE table entry: Rocksmith2014.exe+00F5F62C, offsets [0x20, 0x84, 0x4, 0x18, 0xB0]
-        // (CE display order — outermost first, i.e. added last to the deepest pointer).
-        // Walk order (which FollowPointers expects) is the REVERSE: [0xB0, 0x18, 0x4, 0x84, 0x20].
-        // Same convention documented for GetCurrentPathPointer (v0.6.5 hotfix5) and
-        // observed for every other multi-offset chain in this file.
+        // (CE display order — outermost first). Walk order (FollowPointers) is the
+        // REVERSE: [0xB0, 0x18, 0x4, 0x84, 0x20] — same convention as every other
+        // multi-offset chain in this file.
         return edition switch
         {
             RSEdition.Remastered_Just_In_Case_We_Need_It_Beta => (0x00F5C5AC, [0xB0, 0x18, 0x4, 0x84, 0x20]),
