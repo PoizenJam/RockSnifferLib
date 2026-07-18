@@ -108,6 +108,16 @@ namespace RockSnifferLib.Sniffing
         private string currentSongRunArrangementID = null;
         private string currentSongRunPath = null;
         private string currentSongRunTuning = null;
+
+        // Rolling snapshot of the readout while a run is live (in-run state, timer
+        // advanced). END payloads read from this instead of currentMemoryReadout:
+        // on Restart-from-pause, Rocksmith zeroes the in-memory noteData for the
+        // NEW attempt before the old attempt's force-end fires, so the current
+        // readout at end-time reports TotalNotes=0 / Accuracy=100 (0-of-0). The
+        // snapshot still holds the old attempt's last real values. Reset at song
+        // start so an instantly-abandoned run can't inherit the previous song's
+        // stats.
+        private RSMemoryReadout lastInRunReadout = null;
         // True if the song started in a Nonstop Play gameStage (nsp_main /
         // nonstopplayhub / nonstopplaygame). Set by Sniffer.cs at song start.
         // Informational only.
@@ -361,6 +371,30 @@ namespace RockSnifferLib.Sniffing
                 previousPauseMenuMode = currentMemoryReadout?.pauseMenuMode ?? PauseMenuMode.None;
 
                 newReadout.CopyTo(ref currentMemoryReadout);
+
+                // Rolling in-run snapshot for END payloads (see lastInRunReadout docs).
+                // Two guards beyond the state check:
+                //   timer > 0 — the timer-reset poll that triggers a force-end must
+                //   not capture.
+                //   monotonic timer — after Restart-from-pause, gameStage/pauseMenuMode
+                //   stickiness keeps the state reading SONG_PAUSED while the NEW
+                //   attempt's timer is already climbing; without this guard the new
+                //   attempt's zeroed noteData overwrites the old attempt's snapshot
+                //   before its force-end fires. A backwards timer always means a new
+                //   attempt (restart) or the post-resume rewind; in both cases the
+                //   existing snapshot is the one END must keep. Captures resume once
+                //   the timer passes the snapshot again (resume case) or the START
+                //   baseline resets the snapshot (restart case).
+                if ((currentState == SnifferState.SONG_STARTING ||
+                     currentState == SnifferState.SONG_PLAYING ||
+                     currentState == SnifferState.SONG_PAUSED ||
+                     currentState == SnifferState.SONG_ENDING) &&
+                    currentMemoryReadout.songTimer > 0 &&
+                    (lastInRunReadout == null ||
+                     currentMemoryReadout.songTimer >= lastInRunReadout.songTimer))
+                {
+                    lastInRunReadout = currentMemoryReadout.Clone();
+                }
 
                 // Track timer behaviour for pause detection
                 if (currentMemoryReadout.songTimer >= 0.001f)
@@ -854,6 +888,10 @@ namespace RockSnifferLib.Sniffing
             // Fire-once guard: this songID's start is now logged.
             lastLogStartedForSongID = currentCDLCDetails.songID;
 
+            // Baseline the in-run snapshot at run start so END can't inherit a
+            // previous song's data if this run is abandoned before any capture.
+            lastInRunReadout = currentMemoryReadout?.Clone();
+
             // Reset the END guard (cleared from any previous run of THIS or any other song).
             // Without this clear, if the user replays the same song (songID unchanged), the
             // LogSongEnd fire-once check would see lastLogEndedForSongID == currentCDLCDetails.songID
@@ -947,7 +985,12 @@ namespace RockSnifferLib.Sniffing
             // Snapshot the song details and readout NOW, so any later updates to
             // currentCDLCDetails / currentMemoryReadout don't bleed into the event payload.
             var snapshotSong = currentCDLCDetails;
-            var snapshotReadout = currentMemoryReadout?.Clone();
+            // Prefer the rolling in-run snapshot: for natural completions its last
+            // update IS the final state, and for force-ends (restart, songID flip,
+            // gameStage) it holds the ended attempt's last real values rather than
+            // whatever the memory reads after Rocksmith has already reset for the
+            // next attempt.
+            var snapshotReadout = (lastInRunReadout ?? currentMemoryReadout)?.Clone();
             var noteData = snapshotReadout?.noteData ?? currentMemoryReadout.noteData;
 
             // Build base log message
@@ -1146,9 +1189,43 @@ namespace RockSnifferLib.Sniffing
                              currentMemoryReadout.songTimer > initTime &&
                              currentMemoryReadout.songTimer != pauseTimerSnapshot)
                     {
-                        currentState = SnifferState.SONG_PLAYING;
-                        Logger.Log("Song Resumed! (pauseMenuMode=None at timer {0:F3}, was paused at {1:F3})", currentMemoryReadout.songTimer, pauseTimerSnapshot);
-                        pauseTimerSnapshot = float.MinValue;
+                        // Restart-vs-resume disambiguation. Timer arithmetic alone cannot
+                        // tell them apart: Restart seeks to the first-note point, resume
+                        // rewinds ~2s from the pause point, and the two can land on the
+                        // same timer value. The timer<=initTime branch above only catches
+                        // restarts whose load transient (timer 0) happens to be polled
+                        // while the pause flag is still sticky; quick restarts miss it.
+                        // The reliable discriminator is the cumulative note counter:
+                        // Restart zeroes noteData for the new attempt, resume preserves
+                        // it. The in-run snapshot (monotonic, so the new attempt cannot
+                        // have overwritten it) holds the old attempt's counter to compare
+                        // against. When either side is unavailable, fall through to the
+                        // resume interpretation (previous behavior).
+                        int currentTotal = currentMemoryReadout.noteData?.TotalNotes ?? -1;
+                        int snapshotTotal = lastInRunReadout?.noteData?.TotalNotes ?? -1;
+                        if (currentTotal >= 0 && snapshotTotal > 0 && currentTotal < snapshotTotal)
+                        {
+                            Logger.Log("Song Restarted! (notes counter reset {0} -> {1}, timer {2:F3})", snapshotTotal, currentTotal, currentMemoryReadout.songTimer);
+
+                            completed = false;
+                            LogSongEnd(completed: false);
+                            currentState = SnifferState.IN_MENUS;
+
+                            // Reset timers so the new run gets clean values and START
+                            // re-arms (same reset set as the timer<=initTime branch).
+                            lowTime = float.MaxValue;
+                            initTime = float.MaxValue;
+                            maxTime = float.MinValue;
+                            lastObservedTimer = float.MinValue;
+                            pauseTimerSnapshot = float.MinValue;
+                            paused = false;
+                        }
+                        else
+                        {
+                            currentState = SnifferState.SONG_PLAYING;
+                            Logger.Log("Song Resumed! (pauseMenuMode=None at timer {0:F3}, was paused at {1:F3})", currentMemoryReadout.songTimer, pauseTimerSnapshot);
+                            pauseTimerSnapshot = float.MinValue;
+                        }
                     }
                     break;
 
