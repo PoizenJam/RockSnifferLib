@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -14,15 +14,14 @@ namespace RockSnifferLib.RSHelpers
     /// </summary>
     public enum RSMode
     {
-        UNKNOWN,        // 0 - default / unrecognized gameStage
-        LEARNASONG,     // 1 - learnasong, las_*, las_pause, las_songreview
-        SCOREATTACK,    // 2 - scoreattack, sa_*, panel_bib, scoreattack_presongtuner
-        MULTIPLAYER,    // 3 - mp_*, duet_*, h2h_*, split_game (full multiplayer support TBD)
-        NONSTOPPLAY,    // 4 - nonstopplay, nsp_*, nonstopplayhub, nonstopplaygame
-        GUITARCADE,     // 5 - gcpre, gcade, gcade_game, guitarcade_tuner, gc_*
-        SESSION,        // 6 - sm_* (Session Mode)
-        LESSONS,        // 7 - ge_*, getuner, pregametuner
-        MENU            // 8 - titlescreen, profileselect, main, mainmenu, statsmenu,
-                        //     shop, contentpanelchord, sidelist, tonedesigner*
+        UNKNOWN,
+        LEARNASONG,
+        SCOREATTACK,
+        MULTIPLAYER,
+        NONSTOPPLAY,
+        GUITARCADE,
+        SESSION,
+        LESSONS,
+        MENU
     }
 }

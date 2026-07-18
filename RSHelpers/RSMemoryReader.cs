@@ -1,4 +1,4 @@
-﻿using RockSnifferLib.RSHelpers.NoteData;
+using RockSnifferLib.RSHelpers.NoteData;
 using RockSnifferLib.SysHelpers;
 using System;
 using System.Diagnostics;
@@ -146,7 +146,7 @@ namespace RockSnifferLib.RSHelpers
             string resolved_arrangement_id;
             if (usePlayArrIDChain)
             {
-                resolved_arrangement_id = ReadPlayArrIDFromMemory(
+                resolved_arrangement_id = ReadGuidFromMemory(
                     FollowPointers(MemoryOffsets.GetPlayArrIDPointer(edition)));
             }
             else
@@ -478,7 +478,7 @@ namespace RockSnifferLib.RSHelpers
         /// ToUpperInvariant for the case-sensitive cross-reference in Sniffer.cs).
         /// Returns null when the chain is broken or the bytes are unreadable.
         /// </summary>
-        private string ReadPlayArrIDFromMemory(IntPtr address)
+        private string ReadGuidFromMemory(IntPtr address)
         {
             if (address == IntPtr.Zero)
             {

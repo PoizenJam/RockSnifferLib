@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace RockSnifferLib.RSHelpers;
 
@@ -110,9 +110,9 @@ public static class MemoryOffsets
     {
         return edition switch
         {
-            RSEdition.Remastered_Just_In_Case_We_Need_It_Beta => (0xF5F7C9 - 0x3080, []),
-            RSEdition.Remastered => (0xF5F7C9, []),
-            RSEdition.Remastered_Learn_And_Play => (0xF5F7C9 + 0x1000, []),
+            RSEdition.Remastered_Just_In_Case_We_Need_It_Beta => (0x00F5C749, []),
+            RSEdition.Remastered => (0x00F5C749 + 0x3080, []),
+            RSEdition.Remastered_Learn_And_Play => (0x00F5C749 + 0x4080, []),
             _ => throw new ArgumentOutOfRangeException(nameof(edition), edition, "Unknown edition")
         };
     }
@@ -220,9 +220,9 @@ public static class MemoryOffsets
     {
         return edition switch
         {
-            RSEdition.Remastered_Just_In_Case_We_Need_It_Beta => (0xF5F5FC - 0x3080, []),
-            RSEdition.Remastered => (0xF5F5FC, []),
-            RSEdition.Remastered_Learn_And_Play => (0xF5F5FC + 0x1000, []),
+            RSEdition.Remastered_Just_In_Case_We_Need_It_Beta => (0x00F5C57C, []),
+            RSEdition.Remastered => (0x00F5C57C + 0x3080, []),
+            RSEdition.Remastered_Learn_And_Play => (0x00F5C57C + 0x4080, []),
             _ => throw new ArgumentOutOfRangeException(nameof(edition), edition, "Unknown edition")
         };
     }

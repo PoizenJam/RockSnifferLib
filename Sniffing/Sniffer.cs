@@ -125,6 +125,14 @@ namespace RockSnifferLib.Sniffing
         private string lastLogStartedForSongID = null;
         private string lastLogEndedForSongID = null;
 
+        // Floor for case-2 (no-input-boot) detection. Rocksmith's no-input
+        // abort only fires before the timer advances meaningfully; once
+        // playback is moving, audio-input drop triggers auto-pause instead.
+        // 0.1s is well below any legitimate play time and well above the
+        // float-near-zero initialization flashes (e.g. 9.2515e-37) that can
+        // briefly appear during chart load.
+        private const float MIN_PROGRESS_SECONDS = 0.1f;
+
         // Previous gameStage observed (used to detect transitions, primarily for
         // Nonstop Play where the timer-based state machine is unreliable).
         private string lastGameStage = null;
@@ -713,7 +721,7 @@ namespace RockSnifferLib.Sniffing
                         !arr.isBonusArrangement && !arr.isAlternateArrangement)
                     {
                         arrangement = arr;
-                        fallbackReason = "current Path \"" + currentPath + "\" + non-bonus filter";
+                        fallbackReason = $"current Path \"{currentPath}\" + non-bonus filter";
                         break;
                     }
                 }
@@ -726,7 +734,7 @@ namespace RockSnifferLib.Sniffing
                         if (arr.type == currentPath || arr.name == currentPath)
                         {
                             arrangement = arr;
-                            fallbackReason = "current Path \"" + currentPath + "\" (bonus/alt allowed)";
+                            fallbackReason = $"current Path \"{currentPath}\" (bonus/alt allowed)";
                             break;
                         }
                     }
@@ -820,15 +828,15 @@ namespace RockSnifferLib.Sniffing
             }
 
             Logger.Log(
-                "EVENT=START;" +
-                "artist=" + currentCDLCDetails.artistName + ";" +
-                "album=" + currentCDLCDetails.albumName + ";" +
-                "year=" + currentCDLCDetails.albumYear + ";" +
-                "song=" + currentCDLCDetails.songName + ";" +
-                "length=" + currentCDLCDetails.songLength + ";" +
-                "path=" + path + ";" +
-                "tuning=" + tuning + ";" +
-                "author=" + (currentCDLCDetails.toolkit?.author ?? "").Trim() + ";"
+                $"EVENT=START;" +
+                $"artist={currentCDLCDetails.artistName};" +
+                $"album={currentCDLCDetails.albumName};" +
+                $"year={currentCDLCDetails.albumYear};" +
+                $"song={currentCDLCDetails.songName};" +
+                $"length={currentCDLCDetails.songLength};" +
+                $"path={path};" +
+                $"tuning={tuning};" +
+                $"author={(currentCDLCDetails.toolkit?.author ?? "").Trim()};"
             );
 
             // Capture song-run context so end-of-song logging can recover even if
@@ -864,14 +872,6 @@ namespace RockSnifferLib.Sniffing
                 wasMultiplayerMode = currentSongRunWasMultiplayerMode
             });
         }
-
-        // Floor for case-2 (no-input-boot) detection. Rocksmith's no-input
-        // abort only fires before the timer advances meaningfully; once
-        // playback is moving, audio-input drop triggers auto-pause instead.
-        // 0.1s is well below any legitimate play time and well above the
-        // float-near-zero initialization flashes (e.g. 9.2515e-37) that can
-        // briefly appear during chart load.
-        private const float MIN_PROGRESS_SECONDS = 0.1f;
 
         /// <summary>
         /// Decides the completed flag for force-end paths (SONG_PLAYING→timer=0,
@@ -951,7 +951,7 @@ namespace RockSnifferLib.Sniffing
 
             // Build base log message
             StringBuilder logMessage = new StringBuilder();
-            logMessage.Append("EVENT=END;");
+            logMessage.Append($"EVENT=END;");
             logMessage.Append($"completed={completed};");
             logMessage.Append($"paused={paused};");
             logMessage.Append($"accuracy={Math.Round(noteData.Accuracy, 1)}%;");
