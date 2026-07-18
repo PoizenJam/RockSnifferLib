@@ -91,13 +91,13 @@ namespace RockSnifferLib.Sniffing
         private float pauseTimerSnapshot = float.MinValue;
 
         /// <summary>
-        /// Previous poll's pauseMenuMode. Pause entry requires the 0 → non-zero
+        /// Previous poll's pauseMenuMode. Pause entry requires the None → non-None
         /// TRANSITION, not the raw value — after Restart from the pause menu, Rocksmith
-        /// briefly keeps reading 2 while the new song is already playing, which would
-        /// otherwise fire a false SONG_PLAYING → SONG_PAUSED. Captured each poll before
-        /// newReadout overwrites currentMemoryReadout.
+        /// briefly keeps reading TopOverlay while the new song is already playing, which
+        /// would otherwise fire a false SONG_PLAYING → SONG_PAUSED. Captured each poll
+        /// before newReadout overwrites currentMemoryReadout.
         /// </summary>
-        private byte previousPauseMenuMode = 0;
+        private PauseMenuMode previousPauseMenuMode = PauseMenuMode.None;
 
         // SONG-RUN CONTEXT: the arrangement context (ID, path, tuning) of the running
         // song, captured at LogSongStartIfPossible and preserved through LogSongEnd.
@@ -358,7 +358,7 @@ namespace RockSnifferLib.Sniffing
 
                 // Capture previous poll's pauseMenuMode BEFORE CopyTo overwrites
                 // currentMemoryReadout; pause entry requires a real 0 → non-zero transition.
-                previousPauseMenuMode = currentMemoryReadout?.pauseMenuMode ?? 0;
+                previousPauseMenuMode = currentMemoryReadout?.pauseMenuMode ?? PauseMenuMode.None;
 
                 newReadout.CopyTo(ref currentMemoryReadout);
 
@@ -708,7 +708,8 @@ namespace RockSnifferLib.Sniffing
             // MemoryOffsets.GetCurrentPathPointer; reliable from launch and valid in
             // Nonstop Play). Path only encodes the type (Lead/Rhythm/Bass), so filter
             // non-bonus/non-alternate first to disambiguate.
-            string currentPath = currentMemoryReadout?.currentPath;
+            string currentPath = (currentMemoryReadout != null && currentMemoryReadout.currentPath != RSPath.Unknown)
+                ? currentMemoryReadout.currentPath.ToString() : null;
             if (arrangement == null && !string.IsNullOrEmpty(currentPath) &&
                 currentCDLCDetails.arrangements != null)
             {
@@ -1097,13 +1098,12 @@ namespace RockSnifferLib.Sniffing
                         break;
                     }
 
-                    // Pause entry: pauseMenuMode encodes blocking-overlay state (0=none,
-                    // 1=sub-overlay e.g. tuner-from-pause, 2=top-level pause menu / Mixer /
-                    // restart confirmation). Detection requires the 0 → non-zero TRANSITION —
-                    // after Restart from the pause menu the value briefly stays 2 while the new
-                    // song plays, and raw-value detection would fire a false pause.
-                    if (previousPauseMenuMode == 0 &&
-                        currentMemoryReadout.pauseMenuMode != 0 &&
+                    // Pause entry: see the PauseMenuMode enum for the overlay-state values.
+                    // Detection requires the None → non-None TRANSITION — after Restart from
+                    // the pause menu the value briefly stays TopOverlay while the new song
+                    // plays, and raw-value detection would fire a false pause.
+                    if (previousPauseMenuMode == PauseMenuMode.None &&
+                        currentMemoryReadout.pauseMenuMode != PauseMenuMode.None &&
                         initTime != float.MaxValue &&
                         currentMemoryReadout.songTimer > initTime)
                     {
@@ -1137,7 +1137,7 @@ namespace RockSnifferLib.Sniffing
                         paused = false;
                     }
                     // Pause exit: flag-driven — resume is recognized on the first poll where
-                    // pauseMenuMode returns to 0 AND songTimer has moved from the pause-entry
+                    // pauseMenuMode returns to None AND songTimer has moved from the pause-entry
                     // snapshot. The timer guard matters: on Exit-from-pause the flag clears while
                     // the timer stays frozen, and without the guard that reads as a spurious
                     // resume before the menu transition lands. (Rocksmith also rewinds the timer
@@ -1147,7 +1147,7 @@ namespace RockSnifferLib.Sniffing
                              currentMemoryReadout.songTimer != pauseTimerSnapshot)
                     {
                         currentState = SnifferState.SONG_PLAYING;
-                        Logger.Log("Song Resumed! (pauseMenuMode=0 at timer {0:F3}, was paused at {1:F3})", currentMemoryReadout.songTimer, pauseTimerSnapshot);
+                        Logger.Log("Song Resumed! (pauseMenuMode=None at timer {0:F3}, was paused at {1:F3})", currentMemoryReadout.songTimer, pauseTimerSnapshot);
                         pauseTimerSnapshot = float.MinValue;
                     }
                     break;

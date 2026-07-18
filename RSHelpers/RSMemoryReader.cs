@@ -165,26 +165,25 @@ namespace RockSnifferLib.RSHelpers
             // menu level. 1-byte enum at a stable address, populated from launch (defaults
             // 0x01/Lead), mutated only when the user switches Path. Works in Nonstop Play,
             // where arrangement_hash fails. Mapping: 0x01=Lead, 0x02=Rhythm, 0x04=Bass,
-            // else Unknown (empty string, so Sniffer.cs falls through to heuristics).
+            // else Unknown (Sniffer.cs then falls through to heuristics).
             try
             {
                 IntPtr pathAddr = FollowPointers(MemoryOffsets.GetCurrentPathPointer(edition));
                 if (pathAddr != IntPtr.Zero)
                 {
                     byte pathByte = MemoryHelper.ReadByteFromMemory(rsProcessHandle, pathAddr);
-                    readout.currentPathByte = pathByte;
                     readout.currentPath = pathByte switch
                     {
-                        0x01 => "Lead",
-                        0x02 => "Rhythm",
-                        0x04 => "Bass",
-                        _ => ""
+                        0x01 => RSPath.Lead,
+                        0x02 => RSPath.Rhythm,
+                        0x04 => RSPath.Bass,
+                        _ => RSPath.Unknown
                     };
                 }
             }
             catch
             {
-                // Best-effort read — leave currentPathByte/currentPath at their default values.
+                // Best-effort read — leave currentPath at its default value.
                 // This shouldn't happen in practice (pointer chain has been observed stable),
                 // but defensive coding keeps a transient memory hiccup from killing the poll.
             }
@@ -201,8 +200,14 @@ namespace RockSnifferLib.RSHelpers
                 if (pauseModeAddr != IntPtr.Zero)
                 {
                     byte modeByte = MemoryHelper.ReadByteFromMemory(rsProcessHandle, pauseModeAddr);
-                    readout.pauseMenuMode = modeByte;
-                    readout.isPaused = modeByte != 0;
+                    readout.pauseMenuMode = modeByte switch
+                    {
+                        0 => PauseMenuMode.None,
+                        1 => PauseMenuMode.SubOverlay,
+                        2 => PauseMenuMode.TopOverlay,
+                        _ => (PauseMenuMode)modeByte
+                    };
+                    readout.isPaused = readout.pauseMenuMode != PauseMenuMode.None;
                 }
             }
             catch
@@ -246,7 +251,6 @@ namespace RockSnifferLib.RSHelpers
             // always propagate, same as songID/gameStage. Without this, prevReadout would
             // only get the path during active gameplay (songTimer > 0), and consumers
             // querying `prevReadout.currentPath` while in song-select would see stale data.
-            prevReadout.currentPathByte = readout.currentPathByte;
             prevReadout.currentPath = readout.currentPath;
 
             // pauseMenuMode reflects engine overlay state and can flip on user input

@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using RockSnifferLib.Logging;
 using RockSnifferLib.RSHelpers.NoteData;
@@ -21,22 +21,18 @@ namespace RockSnifferLib.RSHelpers
         /// Persistent across game stages, populated from launch, only changes when the
         /// user actively switches Path in options or song-select. Crucially works in
         /// Nonstop Play, where the per-song arrangement_hash pointer fails.
-        ///
-        /// Raw byte values: 0x01=Lead, 0x02=Rhythm, 0x04=Bass, anything else=Unknown.
-        /// `currentPath` (string) is the human-readable form — "Lead", "Rhythm", "Bass",
-        /// or "" (empty string) when the byte doesn't match a known value.
+        /// Serialized as the member name ("Lead", "Rhythm", "Bass", "Unknown").
         /// </summary>
-        public byte currentPathByte = 0;
-        public string currentPath = "";
+        [JsonConverter(typeof(StringEnumConverter))]
+        public RSPath currentPath = RSPath.Unknown;
 
         /// <summary>
-        /// Raw value of Rocksmith's pause-menu mode byte: 0 = no blocking overlay,
-        /// 1 = sub-overlay (e.g. tuner-from-pause), 2 = top-level overlay (pause menu,
-        /// Mixer, Tools, restart confirmation). Value 2 also fires for the main menu's
-        /// Tools overlay — "paused during a song" requires combining with a SnifferState
-        /// check. See MemoryOffsets.GetPauseMenuModePointer for the full table.
+        /// Blocking-overlay state, serialized as the member name ("None",
+        /// "SubOverlay", "TopOverlay"). See the PauseMenuMode enum for the value
+        /// documentation and caveats.
         /// </summary>
-        public byte pauseMenuMode = 0;
+        [JsonConverter(typeof(StringEnumConverter))]
+        public PauseMenuMode pauseMenuMode = PauseMenuMode.None;
 
         /// <summary>
         /// True when any blocking pause-style overlay is active (pauseMenuMode != 0).
@@ -76,7 +72,6 @@ namespace RockSnifferLib.RSHelpers
             copy.arrangementID = arrangementID;
             copy.gameStage = gameStage;
 
-            copy.currentPathByte = currentPathByte;
             copy.currentPath = currentPath;
 
             copy.pauseMenuMode = pauseMenuMode;
