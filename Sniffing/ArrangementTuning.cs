@@ -1,4 +1,4 @@
-﻿using Rocksmith2014PsarcLib.Psarc.Models.Json;
+using Rocksmith2014PsarcLib.Psarc.Models.Json;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -151,6 +151,10 @@ namespace RockSnifferLib.Sniffing
             var sb = new System.Text.StringBuilder();
             for (int i = 0; i < stringCount; i++)
             {
+                // Canonical positive modulus: C#'s % is a signed remainder, and CDLC
+                // metadata offsets can push (base + offset) below -12 (the tuning
+                // dictionary above itself contains -14), which would make the
+                // single-mod form a negative index into NoteNames.
                 int semitone = ((StandardBase[i] + offsets[i]) % 12 + 12) % 12;
                 sb.Append(NoteNames[semitone]);
             }
